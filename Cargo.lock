@@ -4298,6 +4298,7 @@ name = "porda-tray"
 version = "3.0.0"
 dependencies = [
  "anyhow",
+ "ksni",
  "porda-config",
  "porda-core",
  "porda-platform",
