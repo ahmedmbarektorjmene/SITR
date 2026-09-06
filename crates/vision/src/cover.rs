@@ -37,14 +37,14 @@ pub fn generate_cover(
 }
 
 pub fn generate_blur_data(frame: &FrameData, rect: &ScreenRect) -> Option<Vec<u8>> {
-    let region = frame.region(rect)?;
-    if region.width == 0 || region.height == 0 || region.data.is_empty() {
+    let bgr = frame.region_bgr(rect)?;
+    if rect.width == 0 || rect.height == 0 || bgr.is_empty() {
         return None;
     }
     Some(crate::preprocessing::blur_region(
-        &region.data,
-        region.width,
-        region.height,
+        &bgr,
+        rect.width,
+        rect.height,
     ))
 }
 

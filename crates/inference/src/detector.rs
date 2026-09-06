@@ -1,21 +1,211 @@
-#[cfg(feature = "opencv")]
-use opencv::prelude::*;
-use vision::detection::{Detection, FrameData};
+use ort::ep;
+use ort::inputs;
+use ort::logging::LogLevel;
+use ort::session::builder::GraphOptimizationLevel;
+use ort::session::Session;
+use ort::value::TensorRef;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::time::Instant;
+use tracing::{info, warn};
+use vision::detection::{Detection, FrameData, ObjectClass, PixelFormat};
 use vision::geometry::ScreenRect;
+
+use crate::yolo::{decode_heads, filter_and_nms, YoloCandidate};
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of output tensors/heads supported without a heap allocation
+/// in the per-frame inference path.
+///
+/// This is NOT the number of heads in the model.
+/// The actual model output count is checked at runtime.
+const MAX_OUTPUTS: usize = 16;
+
+/// Reasonable initial capacity for decoded YOLO candidates.
+///
+/// This is only an initial allocation during detector construction.
+/// The Vec is reused across frames.
+const INITIAL_CANDIDATE_CAPACITY: usize = 1024;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, thiserror::Error)]
 pub enum InferenceError {
     #[error("Model not loaded")]
     ModelNotLoaded,
+
     #[error("Inference failed: {0}")]
     Failed(String),
+
     #[error("Backend not available: {0}")]
     BackendNotAvailable(String),
+
+    #[error("Input shape mismatch: got {got} elements, expected {expected}")]
+    ShapeMismatch { got: usize, expected: usize },
+
+    #[error("Model has {count} outputs, but maximum supported is {max}")]
+    TooManyOutputs { count: usize, max: usize },
 }
 
-pub trait Detector: Send + Sync {
+// ---------------------------------------------------------------------------
+// Per-frame timing breakdown
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DetectTimings {
+    /// Fused native-format → NCHW f32
+    /// (downsample + channel swap + /255)
+    pub preprocess_ms: f64,
+
+    /// Tensor/view/binding setup.
+    pub tensor_view_ms: f64,
+
+    /// `session.run` / `run_binding`.
+    pub session_run_ms: f64,
+
+    /// Output tensor view extraction.
+    pub output_extract_ms: f64,
+
+    /// YOLO decode.
+    pub decode_ms: f64,
+
+    /// Sorting step inside NMS.
+    pub sort_ms: f64,
+
+    /// NMS suppression.
+    pub nms_ms: f64,
+
+    /// Candidate → Detection conversion.
+    pub final_conv_ms: f64,
+
+    /// Aggregate post-processing.
+    pub postprocess_ms: f64,
+
+    /// Entire detect call.
+    pub total_ms: f64,
+}
+
+impl DetectTimings {
+    #[inline]
+    fn ms(d: std::time::Duration) -> f64 {
+        d.as_secs_f64() * 1000.0
+    }
+}
+
+fn profile_enabled() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+    *CACHED.get_or_init(|| match std::env::var("PORDA_PROFILE") {
+        Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+        Err(_) => true,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type Head<'a> = (&'a [f32], u32, u32);
+
+// ---------------------------------------------------------------------------
+// ORT environment
+// ---------------------------------------------------------------------------
+
+/// Initialize ORT environment exactly once.
+fn ensure_ort_env() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+
+    INIT.call_once(|| {
+        let verbose = std::env::var("PORDA_ORT_VERBOSE")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+
+        let committed = ort::init()
+            .with_name("porda")
+            .with_telemetry(false)
+            .with_logger(Arc::new(
+                move |level: LogLevel,
+                      category: &str,
+                      id: &str,
+                      code_location: &str,
+                      message: &str| {
+                    match level {
+                        LogLevel::Verbose if verbose => {
+                            tracing::debug!(
+                                target: "ort",
+                                category,
+                                id,
+                                code_location,
+                                "{message}"
+                            );
+                        }
+
+                        LogLevel::Info => {
+                            tracing::info!(
+                                target: "ort",
+                                category,
+                                id,
+                                code_location,
+                                "{message}"
+                            );
+                        }
+
+                        LogLevel::Warning => {
+                            tracing::warn!(
+                                target: "ort",
+                                category,
+                                id,
+                                code_location,
+                                "{message}"
+                            );
+                        }
+
+                        LogLevel::Error | LogLevel::Fatal => {
+                            tracing::error!(
+                                target: "ort",
+                                category,
+                                id,
+                                code_location,
+                                "{message}"
+                            );
+                        }
+
+                        LogLevel::Verbose => {}
+                    }
+                },
+            ))
+            .commit();
+
+        if committed {
+            info!(
+                "OrtDetector: ORT environment committed \
+                 (verbose WebGPU registration logs enabled)"
+            );
+        } else {
+            warn!(
+                "OrtDetector: ORT environment already committed elsewhere; \
+                 logger may not apply"
+            );
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Detector trait
+// ---------------------------------------------------------------------------
+
+pub trait Detector: Send {
+    /// Detect objects and write them into `detections`.
+    ///
+    /// `detections` is caller-owned and should be reused between frames.
+    /// The implementation clears it but does not free its capacity.
     fn detect(
-        &self,
+        &mut self,
         frame: &FrameData,
         confidence_threshold: f32,
         nms_threshold: f32,
@@ -23,24 +213,36 @@ pub trait Detector: Send + Sync {
         network_width: u32,
         network_height: u32,
         screen_rect: &ScreenRect,
-    ) -> Result<Vec<Detection>, InferenceError>;
+        detections: &mut Vec<Detection>,
+    ) -> Result<(), InferenceError>;
 
     fn backend_name(&self) -> &str;
+
+    fn last_timings(&self) -> DetectTimings {
+        DetectTimings::default()
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Mock detector
+// ---------------------------------------------------------------------------
 
 pub struct MockDetector;
 
 impl Detector for MockDetector {
     fn detect(
-        &self,
+        &mut self,
         frame: &FrameData,
         confidence_threshold: f32,
         _nms_threshold: f32,
         target_classes: &[i32],
         _network_width: u32,
         _network_height: u32,
-        screen_rect: &ScreenRect,
-    ) -> Result<Vec<Detection>, InferenceError> {
+        _screen_rect: &ScreenRect,
+        detections: &mut Vec<Detection>,
+    ) -> Result<(), InferenceError> {
+        detections.clear();
+
         tracing::info!(
             "MockDetector: frame {}x{} target_classes={:?} conf_thresh={:.2}",
             frame.width,
@@ -48,31 +250,25 @@ impl Detector for MockDetector {
             target_classes,
             confidence_threshold
         );
-        if std::env::var("PORDA_MOCK_DETECTIONS").is_ok() {
-            tracing::info!(
-                "MockDetector: PORDA_MOCK_DETECTIONS set, generating synthetic detection"
-            );
-            if target_classes.contains(&1) && confidence_threshold <= 0.9 {
-                let w = (frame.width / 4).min(300);
-                let h = (frame.height / 4).min(200);
-                let x = (frame.width as i32 / 2) - (w as i32 / 2);
-                let y = (frame.height as i32 / 2) - (h as i32 / 2);
-                tracing::info!(
-                    "MockDetector: returning 1 detection at ({},{},{},{})",
-                    x,
-                    y,
-                    w,
-                    h
-                );
-                return Ok(vec![Detection {
-                    class: vision::detection::ObjectClass::Female,
-                    confidence: 0.91,
-                    screen_rect: ScreenRect::new(x, y, w, h),
-                }]);
-            }
+
+        if std::env::var("PORDA_MOCK_DETECTIONS").is_ok()
+            && target_classes.contains(&1)
+            && confidence_threshold <= 0.9
+        {
+            let w = (frame.width / 4).min(300);
+            let h = (frame.height / 4).min(200);
+
+            let x = (frame.width as i32 / 2) - (w as i32 / 2);
+            let y = (frame.height as i32 / 2) - (h as i32 / 2);
+
+            detections.push(Detection {
+                class: ObjectClass::Female,
+                confidence: 0.91,
+                screen_rect: ScreenRect::new(x, y, w, h),
+            });
         }
-        let _ = screen_rect;
-        Ok(vec![])
+
+        Ok(())
     }
 
     fn backend_name(&self) -> &str {
@@ -80,216 +276,443 @@ impl Detector for MockDetector {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Execution provider
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InferenceDevice {
-    Auto,
+pub enum ExecutionProvider {
+    WebGpu,
     Cpu,
-    Gpu,
 }
 
-impl std::str::FromStr for InferenceDevice {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "cpu" => Ok(Self::Cpu),
-            "gpu" => Ok(Self::Gpu),
-            _ => Err(format!("unknown device {s}, expected auto|cpu|gpu")),
-        }
-    }
+// ---------------------------------------------------------------------------
+// OrtDetector
+// ---------------------------------------------------------------------------
+
+pub struct OrtDetector {
+    session: Session,
+
+    exec_provider: ExecutionProvider,
+
+    input_name: String,
+    output_names: Vec<String>,
+
+    network_width: u32,
+    network_height: u32,
+
+    /// Reusable CPU input buffer.
+    preprocess_buffer: Vec<f32>,
+
+    last_timings: DetectTimings,
+
+    /// Reusable YOLO candidate buffer.
+    candidate_buf: Vec<YoloCandidate>,
+
+    /// Reusable NMS mask.
+    keep_buf: Vec<bool>,
 }
 
-impl std::fmt::Display for InferenceDevice {
+impl std::fmt::Debug for OrtDetector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Auto => write!(f, "auto"),
-            Self::Cpu => write!(f, "cpu"),
-            Self::Gpu => write!(f, "gpu"),
-        }
+        f.debug_struct("OrtDetector")
+            .field("exec_provider", &self.exec_provider)
+            .field("input_name", &self.input_name)
+            .field("output_names", &self.output_names)
+            .field("network_width", &self.network_width)
+            .field("network_height", &self.network_height)
+            .field("backend", &self.exec_provider)
+            .finish()
     }
 }
 
-#[cfg(feature = "opencv")]
-pub struct OpenCvDetector {
-    onnx_path: std::path::PathBuf,
-    device: InferenceDevice,
-    net: std::sync::Arc<std::sync::Mutex<Option<opencv::dnn::Net>>>,
-}
+impl OrtDetector {
+    // -----------------------------------------------------------------------
+    // Construction
+    // -----------------------------------------------------------------------
 
-#[cfg(not(feature = "opencv"))]
-pub struct OpenCvDetector {
-    onnx_path: std::path::PathBuf,
-    device: InferenceDevice,
-}
+    pub fn new(onnx_path: &std::path::Path) -> Result<Self, InferenceError> {
+        ensure_ort_env();
 
-#[cfg(feature = "opencv")]
-impl OpenCvDetector {
-    pub fn new(onnx_path: std::path::PathBuf, device: InferenceDevice) -> Self {
-        Self::new_with_device(onnx_path, device)
-    }
+        let (session, exec_provider) =
+            Self::build_session_with_fallback(onnx_path).map_err(|e| {
+                InferenceError::BackendNotAvailable(format!("all EP builds failed: {e}"))
+            })?;
 
-    /// Backward compat: old signature took cfg+weights, now expects onnx. If called with cfg, try to find sibling porda.onnx.
-    pub fn new_from_darknet_legacy(_cfg: std::path::PathBuf, _weights: std::path::PathBuf) -> Self {
-        let candidate = std::path::PathBuf::from("model/porda.onnx");
-        Self::new(candidate, InferenceDevice::Cpu)
-    }
+        let input_name = Self::first_input_name(&session);
+        let output_names = Self::output_names(&session);
+        let input_shape = Self::extract_input_dims(&session);
 
-    pub fn new_with_device(onnx_path: std::path::PathBuf, device: InferenceDevice) -> Self {
-        tracing::info!(
-            "OpenCvDetector (ONNX): device={:?} onnx={:?}",
-            device,
-            onnx_path
-        );
-        if !onnx_path.exists() {
-            tracing::warn!("OpenCvDetector: onnx not found at {:?}", onnx_path);
-            return Self {
-                onnx_path,
-                device,
-                net: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            };
-        }
-        let net = match opencv::dnn::read_net_from_onnx_def(onnx_path.to_str().unwrap_or("")) {
-            Ok(mut n) => {
-                // configure backend
-                let configured = Self::configure_backend(&mut n, device);
-                if configured {
-                    tracing::info!(
-                        "OpenCvDetector: ONNX model loaded successfully ({:?})",
-                        onnx_path
-                    );
-                    Some(n)
-                } else {
-                    tracing::warn!(
-                        "OpenCvDetector: backend configuration failed, still keeping net"
-                    );
-                    Some(n)
+        let (net_w, net_h) = {
+            let mut w = 544u32;
+            let mut h = 320u32;
+
+            if let Some((c, ch, cw)) = input_shape {
+                if c == 3 {
+                    w = cw as u32;
+                    h = ch as u32;
                 }
             }
-            Err(e) => {
-                tracing::error!("OpenCvDetector: failed to load ONNX {:?}: {}", onnx_path, e);
-                None
-            }
+
+            (w, h)
         };
-        Self {
-            onnx_path,
-            device,
-            net: std::sync::Arc::new(std::sync::Mutex::new(net)),
+
+        let input_capacity = 3usize * net_w as usize * net_h as usize;
+
+        // Do NOT use input pixel count as candidate capacity.
+        //
+        // Candidate count is determined by model output grids, not by
+        // input resolution.
+        let candidate_buf = Vec::with_capacity(INITIAL_CANDIDATE_CAPACITY);
+
+        let keep_buf = Vec::with_capacity(INITIAL_CANDIDATE_CAPACITY);
+
+        info!(
+            "OrtDetector: loaded EP={:?} input={} \
+             outputs={:?} static_input_shape={:?}",
+            exec_provider, input_name, output_names, input_shape
+        );
+
+        Ok(Self {
+            session,
+            exec_provider,
+            input_name,
+            output_names,
+            network_width: net_w,
+            network_height: net_h,
+
+            preprocess_buffer: vec![0.0f32; input_capacity],
+
+            last_timings: DetectTimings::default(),
+
+            candidate_buf,
+            keep_buf,
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Session construction
+    // -----------------------------------------------------------------------
+
+    fn build_session_with_fallback(
+        onnx_path: &std::path::Path,
+    ) -> Result<(Session, ExecutionProvider), String> {
+        match Self::try_webgpu_session(onnx_path) {
+            Ok(session) => {
+                info!("OrtDetector: WebGPU Execution Provider ACTIVE");
+                Ok((session, ExecutionProvider::WebGpu))
+            }
+
+            Err(e) => {
+                warn!("OrtDetector: WebGPU unavailable ({e}), falling back to CPU");
+
+                Self::try_cpu_session(onnx_path).map(|session| (session, ExecutionProvider::Cpu))
+            }
         }
     }
 
-    fn configure_backend(net: &mut opencv::dnn::Net, device: InferenceDevice) -> bool {
-        use opencv::dnn::{DNN_BACKEND_OPENCV, DNN_TARGET_CPU, DNN_TARGET_OPENCL};
-        fn try_cpu(net: &mut opencv::dnn::Net) -> bool {
-            net.set_preferable_backend(DNN_BACKEND_OPENCV).is_ok()
-                && net.set_preferable_target(DNN_TARGET_CPU).is_ok()
+    fn commit_session(
+        onnx_path: &std::path::Path,
+        providers: &[ep::ExecutionProviderDispatch],
+        intra: usize,
+        inter: usize,
+        parallel: bool,
+    ) -> Result<Session, String> {
+        let builder =
+            Session::builder().map_err(|e| format!("session builder init failed: {e}"))?;
+
+        let builder = builder
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| format!("set graph optimisation level failed: {e}"))?;
+
+        let builder = builder
+            .with_intra_threads(intra)
+            .map_err(|e| format!("set intra threads failed: {e}"))?;
+
+        let builder = builder
+            .with_inter_threads(inter)
+            .map_err(|e| format!("set inter threads failed: {e}"))?;
+
+        let builder = builder
+            .with_parallel_execution(parallel)
+            .map_err(|e| format!("set parallel execution failed: {e}"))?;
+
+        let mut builder = builder
+            .with_execution_providers(providers)
+            .map_err(|e| format!("set execution providers failed: {e}"))?;
+
+        let model_bytes =
+            std::fs::read(onnx_path).map_err(|e| format!("read model bytes failed: {e}"))?;
+
+        builder
+            .commit_from_memory(&model_bytes)
+            .map_err(|e| format!("commit session failed: {e}"))
+    }
+
+    fn try_webgpu_session(onnx_path: &std::path::Path) -> Result<Session, String> {
+        let webgpu = ep::WebGPU::default()
+            .with_device_id(0)
+            .with_enable_graph_capture(true)
+            .build()
+            .error_on_failure();
+
+        Self::commit_session(onnx_path, &[webgpu], 2, 1, false)
+    }
+
+    fn try_cpu_session(onnx_path: &std::path::Path) -> Result<Session, String> {
+        let cpu = ep::CPU::default().with_arena_allocator(true).build();
+
+        Self::commit_session(onnx_path, &[cpu], 2, 1, false)
+    }
+
+    // -----------------------------------------------------------------------
+    // Cached I/O names
+    // -----------------------------------------------------------------------
+
+    fn first_input_name(session: &Session) -> String {
+        let inputs = session.inputs();
+
+        if inputs.is_empty() {
+            return "input".to_string();
         }
-        fn try_gpu(net: &mut opencv::dnn::Net) -> bool {
-            let has_cl = opencv::core::have_opencl().unwrap_or(false);
-            if !has_cl {
-                tracing::info!("OpenCvDetector: OpenCL not available");
-                return false;
-            }
-            if let Err(e) = opencv::core::set_use_opencl(true) {
-                tracing::info!("OpenCvDetector: setUseOpenCL failed: {}", e);
-                return false;
-            }
-            let ok = net.set_preferable_backend(DNN_BACKEND_OPENCV).is_ok()
-                && net.set_preferable_target(DNN_TARGET_OPENCL).is_ok();
-            if ok {
-                tracing::info!("OpenCvDetector: configured GPU (OpenCL)");
-            } else {
-                tracing::info!("OpenCvDetector: GPU target not available");
-            }
-            ok
+
+        inputs
+            .first()
+            .map(|o| o.name().to_string())
+            .unwrap_or_else(|| "input".to_string())
+    }
+
+    fn output_names(session: &Session) -> Vec<String> {
+        session
+            .outputs()
+            .iter()
+            .map(|o| o.name().to_string())
+            .collect()
+    }
+
+    fn extract_input_dims(session: &Session) -> Option<(usize, usize, usize)> {
+        let inputs = session.inputs();
+        let first = inputs.first()?;
+
+        let shape = first.dtype().tensor_shape()?;
+        let dims = shape.deref();
+
+        if dims.len() >= 4 && dims[0] == 1i64 {
+            Some((dims[1] as usize, dims[2] as usize, dims[3] as usize))
+        } else {
+            None
         }
-        match device {
-            InferenceDevice::Cpu => try_cpu(net),
-            InferenceDevice::Gpu => {
-                if try_gpu(net) {
-                    true
-                } else {
-                    tracing::warn!(
-                        "OpenCvDetector: GPU requested but not available, falling back to CPU"
-                    );
-                    try_cpu(net)
+    }
+
+    // -----------------------------------------------------------------------
+    // Preprocessing
+    // -----------------------------------------------------------------------
+
+    /// Fused nearest-neighbour downsample + channel reorder + /255
+    /// directly into NCHW.
+    ///
+    /// No intermediate image buffer is created.
+    #[inline]
+    fn preprocess_frame_to_nchw(
+        frame: &FrameData,
+        out: &mut [f32],
+        net_w: usize,
+        net_h: usize,
+    ) -> Result<(), InferenceError> {
+        let expected = net_w * net_h * 3;
+
+        if out.len() < expected {
+            return Err(InferenceError::ShapeMismatch {
+                got: out.len(),
+                expected,
+            });
+        }
+
+        let src = &frame.data;
+
+        let bpp = frame.format.bytes_per_pixel() as usize;
+
+        let fw = frame.width as usize;
+
+        let fh = frame.height as usize;
+
+        let stride = if frame.stride as usize > 0 {
+            frame.stride as usize
+        } else {
+            fw * bpp
+        };
+
+        let (ri, gi, bi) = match frame.format {
+            PixelFormat::Bgr | PixelFormat::Bgra => (2usize, 1usize, 0usize),
+
+            PixelFormat::Rgb | PixelFormat::Rgba => (0usize, 1usize, 2usize),
+        };
+
+        let plane = net_w * net_h;
+
+        let inv_255 = 1.0f32 / 255.0;
+
+        let last = src.len().saturating_sub(1);
+
+        for y in 0..net_h {
+            let sy = (y * fh) / net_h;
+
+            let row = sy * stride;
+
+            let dst_row = y * net_w;
+
+            for x in 0..net_w {
+                let sx = (x * fw) / net_w;
+
+                let ssi = row + sx * bpp;
+
+                if ssi + bi.max(ri).max(gi) > last {
+                    continue;
                 }
+
+                let r = src[ssi + ri] as f32 * inv_255;
+
+                let g = src[ssi + gi] as f32 * inv_255;
+
+                let b = src[ssi + bi] as f32 * inv_255;
+
+                let i = dst_row + x;
+
+                out[i] = r;
+
+                out[plane + i] = g;
+
+                out[2 * plane + i] = b;
             }
-            InferenceDevice::Auto => {
-                if try_gpu(net) {
-                    true
-                } else {
-                    try_cpu(net)
-                }
-            }
+        }
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Coordinate mapping
+    // -----------------------------------------------------------------------
+
+    #[inline]
+    fn network_rect_to_screen(
+        r: &ScreenRect,
+        screen: &ScreenRect,
+        net_w: u32,
+        net_h: u32,
+    ) -> ScreenRect {
+        let sx = screen.width as f32 / net_w as f32;
+
+        let sy = screen.height as f32 / net_h as f32;
+
+        ScreenRect::new(
+            (screen.x as f32 + r.x as f32 * sx) as i32,
+            (screen.y as f32 + r.y as f32 * sy) as i32,
+            (r.width as f32 * sx) as u32,
+            (r.height as f32 * sy) as u32,
+        )
+    }
+
+    #[inline]
+    fn candidate_to_detection(
+        c: &YoloCandidate,
+        screen: &ScreenRect,
+        net_w: u32,
+        net_h: u32,
+    ) -> Detection {
+        Detection {
+            class: ObjectClass::from_id(c.class_id).unwrap_or(ObjectClass::Female),
+
+            confidence: c.confidence,
+
+            screen_rect: Self::network_rect_to_screen(&c.rect_network, screen, net_w, net_h),
         }
     }
 
-    pub fn onnx_path(&self) -> &std::path::Path {
-        &self.onnx_path
-    }
-    pub fn device(&self) -> InferenceDevice {
-        self.device
+    // -----------------------------------------------------------------------
+    // Post-processing
+    // -----------------------------------------------------------------------
+
+    #[inline]
+    fn postprocess(
+        candidate_buf: &mut Vec<YoloCandidate>,
+        keep_buf: &mut Vec<bool>,
+        heads: &[Head<'_>],
+        cfg_w: u32,
+        cfg_h: u32,
+        target_classes: &[i32],
+        confidence_threshold: f32,
+        nms_threshold: f32,
+        screen_rect: &ScreenRect,
+        detections: &mut Vec<Detection>,
+        timings: &mut DetectTimings,
+    ) {
+        // ---------------------------------------------------------------
+        // Decode
+        // ---------------------------------------------------------------
+
+        candidate_buf.clear();
+
+        let t_decode = Instant::now();
+
+        decode_heads(
+            heads,
+            cfg_w,
+            cfg_h,
+            target_classes,
+            confidence_threshold,
+            candidate_buf,
+        );
+
+        timings.decode_ms = DetectTimings::ms(t_decode.elapsed());
+
+        // ---------------------------------------------------------------
+        // NMS
+        // ---------------------------------------------------------------
+
+        keep_buf.clear();
+
+        let t_nms = Instant::now();
+
+        filter_and_nms(candidate_buf, nms_threshold, keep_buf);
+
+        timings.nms_ms = DetectTimings::ms(t_nms.elapsed());
+
+        // ---------------------------------------------------------------
+        // Candidate -> Detection
+        // ---------------------------------------------------------------
+
+        let t_convert = Instant::now();
+
+        detections.clear();
+
+        // This only grows the caller-owned buffer if necessary.
+        // Once it has reached the required capacity, this is allocation-free.
+        if detections.capacity() < candidate_buf.len() {
+            detections.reserve(candidate_buf.len() - detections.capacity());
+        }
+
+        for candidate in candidate_buf.iter() {
+            detections.push(OrtDetector::candidate_to_detection(
+                candidate,
+                screen_rect,
+                cfg_w,
+                cfg_h,
+            ));
+        }
+
+        timings.final_conv_ms = DetectTimings::ms(t_convert.elapsed());
+
+        timings.postprocess_ms = timings.decode_ms + timings.nms_ms + timings.final_conv_ms;
     }
 }
 
-#[cfg(not(feature = "opencv"))]
-impl OpenCvDetector {
-    pub fn new(onnx_path: std::path::PathBuf, device: InferenceDevice) -> Self {
-        if !onnx_path.exists() {
-            tracing::warn!("OpenCvDetector: onnx not found at {:?}", onnx_path);
-        }
-        Self { onnx_path, device }
-    }
-    pub fn new_with_device(onnx_path: std::path::PathBuf, device: InferenceDevice) -> Self {
-        Self::new(onnx_path, device)
-    }
-    pub fn onnx_path(&self) -> &std::path::Path {
-        &self.onnx_path
-    }
-    pub fn device(&self) -> InferenceDevice {
-        self.device
-    }
-}
+// ---------------------------------------------------------------------------
+// Detector implementation
+// ---------------------------------------------------------------------------
 
-// Keep legacy constructor signature for pipeline compatibility during migration
-impl OpenCvDetector {
-    /// Legacy Darknet constructor (cfg, weights) – now redirects to ONNX if available.
-    /// This keeps `Pipeline` code that calls `OpenCvDetector::new(cfg, weights)` compiling
-    /// while migration is in progress. Prefers `model/porda.onnx` if present.
-    pub fn new_legacy_darknet(
-        config_path: std::path::PathBuf,
-        weights_path: std::path::PathBuf,
-    ) -> Self {
-        let onnx_candidate = config_path
-            .parent()
-            .map(|p| p.join("porda.onnx"))
-            .unwrap_or_else(|| std::path::PathBuf::from("model/porda.onnx"));
-        if onnx_candidate.exists() {
-            tracing::info!(
-                "OpenCvDetector: legacy Darknet paths {:?}/{:?} redirected to ONNX {:?}",
-                config_path,
-                weights_path,
-                onnx_candidate
-            );
-            return Self::new(onnx_candidate, InferenceDevice::Auto);
-        }
-        // Fallback: treat first arg as onnx if it ends with .onnx, else use onnx_candidate
-        if config_path
-            .extension()
-            .map(|e| e == "onnx")
-            .unwrap_or(false)
-        {
-            return Self::new(config_path, InferenceDevice::Auto);
-        }
-        // If ONNX not found, still create with missing path to surface ModelNotLoaded
-        Self::new(onnx_candidate, InferenceDevice::Auto)
-    }
-}
-
-#[cfg(feature = "opencv")]
-impl Detector for OpenCvDetector {
+impl Detector for OrtDetector {
     fn detect(
-        &self,
+        &mut self,
         frame: &FrameData,
         confidence_threshold: f32,
         nms_threshold: f32,
@@ -297,404 +720,209 @@ impl Detector for OpenCvDetector {
         network_width: u32,
         network_height: u32,
         screen_rect: &ScreenRect,
-    ) -> Result<Vec<Detection>, InferenceError> {
-        use opencv::core::{Mat, Scalar, Size, Vector, CV_32F};
-        use opencv::prelude::*;
+        detections: &mut Vec<Detection>,
+    ) -> Result<(), InferenceError> {
+        let t_total = Instant::now();
+        let mut timings = DetectTimings::default();
 
-        let mut guard = self
-            .net
-            .lock()
-            .map_err(|e| InferenceError::Failed(format!("Model mutex poisoned: {}", e)))?;
-        let net = guard.as_mut().ok_or(InferenceError::ModelNotLoaded)?;
-
-        let (padded_data, x_ratio, y_ratio) = vision::preprocessing::resize_and_pad(
-            &frame.data,
-            frame.width,
-            frame.height,
-            network_width,
-            network_height,
-        );
-
-        let (padded_w, padded_h) = if (x_ratio - 1.0).abs() < 0.01 && (y_ratio - 1.0).abs() < 0.01 {
-            (frame.width, frame.height)
+        let cfg_w = if network_width > 0 {
+            network_width
         } else {
-            (network_width, network_height)
+            self.network_width
         };
 
-        tracing::info!(
-            "OpenCvDetector(ONNX): {}x{} -> padded {}x{} ratios {:.3},{:.3} network {}x{} device {:?}",
-            frame.width,
-            frame.height,
-            padded_w,
-            padded_h,
-            x_ratio,
-            y_ratio,
-            network_width,
-            network_height,
-            self.device
-        );
-
-        let vec3b_slice: &[opencv::core::Vec3b] = unsafe {
-            std::slice::from_raw_parts(
-                padded_data.as_ptr() as *const opencv::core::Vec3b,
-                (padded_w * padded_h) as usize,
-            )
-        };
-        let mat = Mat::new_rows_cols_with_data(padded_h as i32, padded_w as i32, vec3b_slice)
-            .map_err(|e| InferenceError::Failed(format!("Mat creation failed: {}", e)))?;
-
-        // Create blob 1/255, swapRB, size network
-        let blob = opencv::dnn::blob_from_image(
-            &mat,
-            1.0 / 255.0,
-            Size::new(network_width as i32, network_height as i32),
-            Scalar::default(),
-            true,
-            false,
-            CV_32F,
-        )
-        .map_err(|e| InferenceError::Failed(format!("blob_from_image failed: {}", e)))?;
-
-        net.set_input(&blob, "", 1.0, Scalar::default())
-            .map_err(|e| InferenceError::Failed(format!("set_input failed: {}", e)))?;
-
-        // Get output names
-        let out_names: Vector<String> = net.get_unconnected_out_layers_names().map_err(|e| {
-            InferenceError::Failed(format!("get_unconnected_out_layers_names failed: {}", e))
-        })?;
-        if out_names.len() != 2 {
-            tracing::warn!(
-                "OpenCvDetector: expected 2 outputs, got {}",
-                out_names.len()
-            );
-        }
-        let mut outs: Vector<Mat> = Vector::new();
-        net.forward(&mut outs, &out_names)
-            .map_err(|e| InferenceError::Failed(format!("forward failed: {}", e)))?;
-
-        if outs.len() != 2 {
-            return Err(InferenceError::Failed(format!(
-                "expected 2 outputs, got {}",
-                outs.len()
-            )));
-        }
-        let mat0 = outs
-            .get(0)
-            .map_err(|e| InferenceError::Failed(format!("outs.get(0) failed: {}", e)))?;
-        let mat1 = outs
-            .get(1)
-            .map_err(|e| InferenceError::Failed(format!("outs.get(1) failed: {}", e)))?;
-
-        // Extract data. Mat is 4D NCHW. We use data_typed if available, else fallback to manual.
-        let (data0, h0, w0) = mat_to_vec(&mat0)?;
-        let (data1, h1, w1) = mat_to_vec(&mat1)?;
-
-        // Determine which head is small grid
-        // h0=10 small, h1=20 large; order may be as produced. Use size to pick mask.
-        let heads = if h0 < h1 {
-            vec![(data0, h0, w0), (data1, h1, w1)]
+        let cfg_h = if network_height > 0 {
+            network_height
         } else {
-            vec![(data1, h1, w1), (data0, h0, w0)]
+            self.network_height
         };
 
-        let candidates = crate::yolo::decode_heads(&heads, network_width, network_height);
-        let filtered = crate::yolo::filter_and_nms(
-            candidates,
-            confidence_threshold,
-            nms_threshold,
-            target_classes,
-        );
+        let net_w = cfg_w as usize;
+        let net_h = cfg_h as usize;
+        let needed = 3 * net_w * net_h;
 
-        // Convert network coords to screen coords
-        let mut detections = Vec::new();
-        let padded_w_f = padded_w as f32;
-        let padded_h_f = padded_h as f32;
-        let net_w_f = network_width as f32;
-        let net_h_f = network_height as f32;
+        let n_outputs = self.output_names.len();
 
-        for cand in filtered {
-            // rect_network is in network 544x320 coords
-            let rn = cand.rect_network;
-            // network -> padded
-            let x_padded = rn.x as f32 * (padded_w_f / net_w_f);
-            let y_padded = rn.y as f32 * (padded_h_f / net_h_f);
-            let w_padded = rn.width as f32 * (padded_w_f / net_w_f);
-            let h_padded = rn.height as f32 * (padded_h_f / net_h_f);
-            // padded -> original via x_ratio/y_ratio
-            let x_orig = (x_padded * x_ratio) as i32 + screen_rect.x;
-            let y_orig = (y_padded * y_ratio) as i32 + screen_rect.y;
-            let w_orig = (w_padded * x_ratio) as u32;
-            let h_orig = (h_padded * y_ratio) as u32;
-            let class = vision::detection::ObjectClass::from_id(cand.class_id)
-                .unwrap_or(vision::detection::ObjectClass::Female);
-            detections.push(Detection {
-                class,
-                confidence: cand.confidence,
-                screen_rect: ScreenRect::new(x_orig, y_orig, w_orig, h_orig),
+        if n_outputs > MAX_OUTPUTS {
+            return Err(InferenceError::TooManyOutputs {
+                count: n_outputs,
+                max: MAX_OUTPUTS,
             });
         }
 
-        tracing::info!(
-            "OpenCvDetector(ONNX): {} detections after NMS",
-            detections.len()
-        );
-        Ok(detections)
+        // IMPORTANT:
+        //
+        // Do not write:
+        //
+        //     let backend = self.backend_name();
+        //
+        // because that creates an immutable borrow of `self` which can
+        // conflict with the mutable borrows below.
+        //
+        // These are all &'static str literals.
+        let backend: &'static str = match self.exec_provider {
+            ExecutionProvider::WebGpu => "ort-webgpu",
+            ExecutionProvider::Cpu => "ort-cpu",
+        };
+
+        // ===================================================================
+        // CPU / pageable CUDA path
+        // ===================================================================
+        {
+            // ---------------------------------------------------------------
+            // Preprocess
+            // ---------------------------------------------------------------
+
+            let t0 = Instant::now();
+
+            // Resize while preserving existing capacity where possible.
+            if self.preprocess_buffer.len() != needed {
+                self.preprocess_buffer.resize(needed, 0.0f32);
+            }
+
+            Self::preprocess_frame_to_nchw(frame, &mut self.preprocess_buffer, net_w, net_h)?;
+
+            timings.preprocess_ms = DetectTimings::ms(t0.elapsed());
+
+            // ---------------------------------------------------------------
+            // Tensor view
+            // ---------------------------------------------------------------
+
+            let t1 = Instant::now();
+
+            let input = TensorRef::from_array_view((
+                [1usize, 3usize, net_h, net_w],
+                &*self.preprocess_buffer,
+            ))
+            .map_err(|e| InferenceError::Failed(format!("build input tensor view: {e}")))?;
+
+            timings.tensor_view_ms = DetectTimings::ms(t1.elapsed());
+
+            // ---------------------------------------------------------------
+            // Inference + output processing
+            // ---------------------------------------------------------------
+            //
+            // `outputs` borrows `self.session`.
+            // Keep all work that needs those output slices inside this scope.
+            //
+            // `postprocess()` only mutably borrows candidate_buf/keep_buf,
+            // not the whole detector.
+            {
+                let t2 = Instant::now();
+
+                let outputs = self
+                    .session
+                    .run(inputs![input])
+                    .map_err(|e| InferenceError::Failed(format!("inference failed: {e}")))?;
+
+                timings.session_run_ms = DetectTimings::ms(t2.elapsed());
+
+                // -----------------------------------------------------------
+                // Extract output tensor views
+                // -----------------------------------------------------------
+
+                let t3 = Instant::now();
+
+                let mut heads: [Head<'_>; MAX_OUTPUTS] = [(&[], 0, 0); MAX_OUTPUTS];
+
+                for idx in 0..n_outputs {
+                    let out = &outputs[idx];
+
+                    let (shape, data) = out.try_extract_tensor::<f32>().map_err(|e| {
+                        InferenceError::Failed(format!("extract output {idx}: {e}"))
+                    })?;
+
+                    let dims = shape.deref();
+
+                    if dims.len() < 4 {
+                        return Err(InferenceError::Failed(format!(
+                            "output {idx} has {} dimensions; \
+                                 expected at least 4",
+                            dims.len()
+                        )));
+                    }
+
+                    heads[idx] = (data, dims[2] as u32, dims[3] as u32);
+                }
+
+                timings.output_extract_ms = DetectTimings::ms(t3.elapsed());
+
+                // -----------------------------------------------------------
+                // Decode + NMS + conversion
+                // -----------------------------------------------------------
+
+                Self::postprocess(
+                    &mut self.candidate_buf,
+                    &mut self.keep_buf,
+                    &heads[..n_outputs],
+                    cfg_w,
+                    cfg_h,
+                    target_classes,
+                    confidence_threshold,
+                    nms_threshold,
+                    screen_rect,
+                    detections,
+                    &mut timings,
+                );
+
+                // `outputs` drops here.
+            }
+        }
+
+        // ===================================================================
+        // Final timing
+        // ===================================================================
+
+        timings.total_ms = DetectTimings::ms(t_total.elapsed());
+
+        self.last_timings = timings;
+
+        if profile_enabled() {
+            info!(
+                "PERF detect: total={:.2}ms | \
+                 preprocess={:.2}ms \
+                 tensor={:.2}ms \
+                 session.run={:.2}ms \
+                 extract={:.2}ms \
+                 decode={:.2}ms \
+                 nms={:.2}ms \
+                 final={:.2}ms \
+                 post={:.2}ms | \
+                 dets={} \
+                 backend={} \
+                 net={}x{} \
+                 frame={}x{} \
+                 fmt={:?}",
+                timings.total_ms,
+                timings.preprocess_ms,
+                timings.tensor_view_ms,
+                timings.session_run_ms,
+                timings.output_extract_ms,
+                timings.decode_ms,
+                timings.nms_ms,
+                timings.final_conv_ms,
+                timings.postprocess_ms,
+                detections.len(),
+                backend,
+                cfg_w,
+                cfg_h,
+                frame.width,
+                frame.height,
+                frame.format,
+            );
+        }
+
+        Ok(())
     }
 
     fn backend_name(&self) -> &str {
-        match self.device {
-            InferenceDevice::Cpu => "opencv-dnn-cpu",
-            InferenceDevice::Gpu => "opencv-dnn-gpu",
-            InferenceDevice::Auto => "opencv-dnn-auto",
-        }
-    }
-}
-
-#[cfg(feature = "opencv")]
-fn mat_to_vec(mat: &opencv::core::Mat) -> Result<(Vec<f32>, u32, u32), InferenceError> {
-    use opencv::prelude::MatTraitConstManual;
-
-    let dims = mat.dims();
-    if dims != 4 && dims != 3 {
-        return Err(InferenceError::Failed(format!("unsupported mat dims {dims}")));
-    }
-
-    let ms = mat.mat_size();
-
-    // Map opencv::Error to InferenceError explicitly on each get call
-    let (c, h, w) = if dims == 4 {
-        (
-            ms.get(1).map_err(|e| InferenceError::Failed(e.to_string()))?,
-            ms.get(2).map_err(|e| InferenceError::Failed(e.to_string()))?,
-            ms.get(3).map_err(|e| InferenceError::Failed(e.to_string()))?,
-        )
-    } else {
-        (
-            ms.get(0).map_err(|e| InferenceError::Failed(e.to_string()))?,
-            ms.get(1).map_err(|e| InferenceError::Failed(e.to_string()))?,
-            ms.get(2).map_err(|e| InferenceError::Failed(e.to_string()))?,
-        )
-    };
-
-    let total = (c * h * w) as usize;
-    let slice = mat
-        .data_typed::<f32>()
-        .map_err(|e| InferenceError::Failed(format!("data_typed failed: {e}")))?;
-
-    if slice.len() < total {
-        return Err(InferenceError::Failed(format!(
-            "buffer underflow: slice len {} < total {}",
-            slice.len(),
-            total
-        )));
-    }
-
-    Ok((slice[..total].to_vec(), h as u32, w as u32))
-}
-
-#[cfg(not(feature = "opencv"))]
-impl Detector for OpenCvDetector {
-    fn detect(
-        &self,
-        frame: &FrameData,
-        _confidence_threshold: f32,
-        _nms_threshold: f32,
-        _target_classes: &[i32],
-        network_width: u32,
-        network_height: u32,
-        screen_rect: &ScreenRect,
-    ) -> Result<Vec<Detection>, InferenceError> {
-        if !self.onnx_path.exists() {
-            return Err(InferenceError::ModelNotLoaded);
-        }
-        tracing::warn!(
-            "OpenCvDetector: onnx found at {:?} ({}x{}), but inference requires `opencv` feature. Frame {}x{} -> {:?}. Returning BackendNotAvailable.",
-            self.onnx_path,
-            network_width,
-            network_height,
-            frame.width,
-            frame.height,
-            screen_rect
-        );
-        Err(InferenceError::BackendNotAvailable(
-            "opencv feature not enabled (need `cargo build -p inference --features opencv` with opencv5)"
-                .to_string(),
-        ))
-    }
-
-    fn backend_name(&self) -> &str {
-        "opencv-dnn"
-    }
-}
-
-#[cfg(test)]
-#[allow(unused_imports)]
-mod tests {
-    use super::*;
-    use vision::detection::FrameData;
-    use vision::geometry::ScreenRect;
-
-    fn onnx_path() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../model/porda.onnx")
-    }
-
-    #[test]
-    fn test_onnx_file_exists() {
-        let p = onnx_path();
-        assert!(p.exists(), "porda.onnx not found at {:?}", p);
-        let meta = std::fs::metadata(&p).unwrap();
-        assert!(meta.len() > 1_000_000, "onnx too small: {}", meta.len());
-    }
-
-    #[test]
-    #[cfg(feature = "opencv")]
-    fn test_onnx_loads_successfully() {
-        let p = onnx_path();
-        let det = OpenCvDetector::new(p.clone(), InferenceDevice::Cpu);
-        // check that net is Some by trying detect on small frame (should not be ModelNotLoaded)
-        let frame = FrameData::new_bgr(544, 320, vec![128u8; 544 * 320 * 3]);
-        let res = det.detect(
-            &frame,
-            0.25,
-            0.1,
-            &[1],
-            544,
-            320,
-            &ScreenRect::new(0, 0, 544, 320),
-        );
-        assert!(
-            res.is_ok(),
-            "detect should succeed on CPU, got {:?}",
-            res.err()
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "opencv")]
-    fn test_cpu_inference_deterministic() {
-        let p = onnx_path();
-        let det = OpenCvDetector::new(p, InferenceDevice::Cpu);
-        // 800x600 needs padding (426x320)
-        let frame = FrameData::new_bgr(800, 600, vec![64u8; 800 * 600 * 3]);
-        let r1 = det
-            .detect(
-                &frame,
-                0.25,
-                0.1,
-                &[1],
-                544,
-                320,
-                &ScreenRect::new(0, 0, 800, 600),
-            )
-            .unwrap();
-        let r2 = det
-            .detect(
-                &frame,
-                0.25,
-                0.1,
-                &[1],
-                544,
-                320,
-                &ScreenRect::new(0, 0, 800, 600),
-            )
-            .unwrap();
-        assert_eq!(r1.len(), r2.len());
-        for (a, b) in r1.iter().zip(r2.iter()) {
-            assert_eq!(a.class, b.class);
-            assert!((a.confidence - b.confidence).abs() < 1e-6);
-            assert_eq!(a.screen_rect, b.screen_rect);
+        match self.exec_provider {
+            ExecutionProvider::WebGpu => "ort-webgpu",
+            ExecutionProvider::Cpu => "ort-cpu",
         }
     }
 
-    #[test]
-    #[cfg(feature = "opencv")]
-    fn test_early_return_1920x1200() {
-        let p = onnx_path();
-        let det = OpenCvDetector::new(p, InferenceDevice::Cpu);
-        // 1920x1200 triggers early return (right 32 bottom 0)
-        let frame = FrameData::new_bgr(1920, 1200, vec![0u8; 1920 * 1200 * 3]);
-        let res = det.detect(
-            &frame,
-            0.25,
-            0.1,
-            &[1],
-            544,
-            320,
-            &ScreenRect::new(0, 0, 1920, 1200),
-        );
-        assert!(res.is_ok());
-        // With blank image should be 0 detections
-        assert_eq!(res.unwrap().len(), 0);
-    }
-
-    #[test]
-    #[cfg(feature = "opencv")]
-    fn test_gpu_fallback_auto() {
-        let p = onnx_path();
-        let det = OpenCvDetector::new(p, InferenceDevice::Auto);
-        let frame = FrameData::new_bgr(544, 320, vec![128u8; 544 * 320 * 3]);
-        let res = det.detect(
-            &frame,
-            0.25,
-            0.1,
-            &[1],
-            544,
-            320,
-            &ScreenRect::new(0, 0, 544, 320),
-        );
-        assert!(
-            res.is_ok(),
-            "Auto device should fallback to CPU if GPU not available"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "opencv")]
-    fn test_target_class_filtering() {
-        let p = onnx_path();
-        let det = OpenCvDetector::new(p, InferenceDevice::Cpu);
-        let frame = FrameData::new_bgr(544, 320, vec![200u8; 544 * 320 * 3]);
-        let r_female = det
-            .detect(
-                &frame,
-                0.25,
-                0.1,
-                &[1],
-                544,
-                320,
-                &ScreenRect::new(0, 0, 544, 320),
-            )
-            .unwrap();
-        let r_male = det
-            .detect(
-                &frame,
-                0.25,
-                0.1,
-                &[0],
-                544,
-                320,
-                &ScreenRect::new(0, 0, 544, 320),
-            )
-            .unwrap();
-        let r_both = det
-            .detect(
-                &frame,
-                0.25,
-                0.1,
-                &[0, 1],
-                544,
-                320,
-                &ScreenRect::new(0, 0, 544, 320),
-            )
-            .unwrap();
-        // female + male should >= each individually
-        assert!(r_both.len() >= r_female.len());
-        assert!(r_both.len() >= r_male.len());
-        for d in &r_female {
-            assert_eq!(d.class as i32, 1);
-        }
-        for d in &r_male {
-            assert_eq!(d.class as i32, 0);
-        }
+    fn last_timings(&self) -> DetectTimings {
+        self.last_timings
     }
 }

@@ -1,6 +1,5 @@
 use crate::geometry::ScreenRect;
 
-
 use fast_image_resize::images::{Image, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 /// Mirrors Python `MainWindow.add_padding` in `Porda-AI/Porda-AI/main.py:782-801`.
@@ -19,7 +18,8 @@ pub fn resize_and_pad(
         return (vec![], 1.0, 1.0);
     }
 
-    let scale = (target_height as f32 / src_height as f32).min(target_width as f32 / src_width as f32);
+    let scale =
+        (target_height as f32 / src_height as f32).min(target_width as f32 / src_width as f32);
     let new_w = (src_width as f32 * scale) as u32;
     let new_h = (src_height as f32 * scale) as u32;
 
@@ -39,13 +39,8 @@ pub fn resize_and_pad(
     }
 
     // 1. Borrow source slice without allocation using ImageRef::new
-    let src_image = ImageRef::new(
-        src_width,
-        src_height,
-        data,
-        PixelType::U8x3,
-    )
-    .expect("Failed to create src image view");
+    let src_image = ImageRef::new(src_width, src_height, data, PixelType::U8x3)
+        .expect("Failed to create src image view");
 
     // 2. Prepare destination image
     let mut dst_image = Image::new(new_w, new_h, PixelType::U8x3);

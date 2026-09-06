@@ -32,6 +32,24 @@ impl ScreenRect {
         self.width as u64 * self.height as u64
     }
 
+    /// Compute Intersection over Union (IoU) between two ScreenRect instances.
+    pub fn iou(&self, other: &ScreenRect) -> f32 {
+        // Intersection area using existing intersection method.
+        let inter_area = match self.intersection(other) {
+            Some(r) => r.area() as f32,
+            None => 0.0,
+        };
+        if inter_area == 0.0 {
+            return 0.0;
+        }
+        let union_area = (self.area() + other.area()) as f32 - inter_area;
+        if union_area == 0.0 {
+            0.0
+        } else {
+            inter_area / union_area
+        }
+    }
+
     pub fn intersection(&self, other: &ScreenRect) -> Option<ScreenRect> {
         let x1 = self.x.max(other.x);
         let y1 = self.y.max(other.y);

@@ -105,10 +105,14 @@ struct LatestFrame {
 
 struct CaptureState {
     latest: Mutex<Option<LatestFrame>>,
+    /// Recycled BGR pixel buffer (capacity reused across frames to avoid ~6–7 MiB allocs).
+    recycle: Mutex<Vec<u8>>,
     condvar: Condvar,
     stream_info: Mutex<Option<StreamInfo>>,
     running: AtomicBool,
     frames_received: std::sync::atomic::AtomicU64,
+    /// Last convert_to_bgr duration in nanoseconds (for PERF logging).
+    last_convert_ns: std::sync::atomic::AtomicU64,
 }
 
 struct PipeWireUserData {
@@ -126,10 +130,12 @@ impl LinuxScreenCapturer {
     pub fn new() -> Self {
         let state = Arc::new(CaptureState {
             latest: Mutex::new(None),
+            recycle: Mutex::new(Vec::new()),
             condvar: Condvar::new(),
             stream_info: Mutex::new(None),
             running: AtomicBool::new(true),
             frames_received: std::sync::atomic::AtomicU64::new(0),
+            last_convert_ns: std::sync::atomic::AtomicU64::new(0),
         });
 
         let state_clone = Arc::clone(&state);
@@ -153,26 +159,31 @@ impl LinuxScreenCapturer {
             return Err(LinuxCaptureError::CaptureDisconnected);
         }
 
-        let guard = self.state.latest.lock().unwrap();
+        let mut guard = self.state.latest.lock().unwrap();
 
-        if guard.is_some() {
-            let latest = guard.as_ref().unwrap();
-            return Ok((latest.frame.clone(), latest.stream_info.clone()));
+        // Take ownership instead of cloning ~6–7 MiB BGR every poll.
+        if let Some(latest) = guard.take() {
+            return Ok((latest.frame, latest.stream_info));
         }
 
-        let (guard, timeout) = self
+        let (mut guard, timeout) = self
             .state
             .condvar
             .wait_timeout(guard, Duration::from_millis(1000))
             .unwrap();
 
-        if let Some(ref latest) = *guard {
-            Ok((latest.frame.clone(), latest.stream_info.clone()))
+        if let Some(latest) = guard.take() {
+            Ok((latest.frame, latest.stream_info))
         } else if timeout.timed_out() {
             Err(LinuxCaptureError::FrameTimeout)
         } else {
             Err(LinuxCaptureError::NoFrames)
         }
+    }
+
+    /// Last PipeWire buffer copy time in milliseconds (raw BGRx memcpy; no BGR convert).
+    pub fn last_convert_ms(&self) -> f64 {
+        self.state.last_convert_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0
     }
 
     pub fn is_running(&self) -> bool {
@@ -501,7 +512,6 @@ fn connect_pipewire_and_run(
                 si.width * bpp
             };
 
-            let bytes_per_row = si.width * bpp;
             let required_size = (actual_stride * si.height) as usize;
             if chunk_size < required_size {
                 tracing::warn!(
@@ -514,14 +524,37 @@ fn connect_pipewire_and_run(
                 return;
             }
 
-            let bgr_data = convert_to_bgr(src_slice, &si, actual_stride, bytes_per_row);
+            // Raw copy of PipeWire-mapped pixels (BGRx/etc). No full-frame BGR convert —
+            // detector downsamples BGRX→NCHW directly. Memcpy of ~9MiB ≪ 73ms pixel shuffle.
+            let mut raw_buf = {
+                let mut latest = user_data.state.latest.lock().unwrap();
+                if let Some(old) = latest.take() {
+                    old.frame.data
+                } else {
+                    drop(latest);
+                    let mut recycle = user_data.state.recycle.lock().unwrap();
+                    std::mem::take(&mut *recycle)
+                }
+            };
 
+            let t_copy = Instant::now();
+            if raw_buf.len() != required_size {
+                raw_buf.resize(required_size, 0);
+            }
+            raw_buf[..required_size].copy_from_slice(&src_slice[..required_size]);
+            let copy_ns = t_copy.elapsed().as_nanos() as u64;
+            user_data
+                .state
+                .last_convert_ns
+                .store(copy_ns, Ordering::Relaxed);
+
+            let pixel_format = spa_to_pixel_format(si.format);
             let frame = FrameData::new_with_stride(
                 si.width,
                 si.height,
-                si.width * 3,
-                bgr_data,
-                PixelFormat::Bgr,
+                actual_stride,
+                raw_buf,
+                pixel_format,
             );
 
             let new_frame = LatestFrame {
@@ -532,7 +565,10 @@ fn connect_pipewire_and_run(
 
             {
                 let mut latest = user_data.state.latest.lock().unwrap();
-                *latest = Some(new_frame);
+                if let Some(old) = latest.replace(new_frame) {
+                    let mut recycle = user_data.state.recycle.lock().unwrap();
+                    *recycle = old.frame.data;
+                }
             }
             user_data.state.frames_received.fetch_add(1, Ordering::Relaxed);
             user_data.state.condvar.notify_one();
@@ -657,16 +693,40 @@ fn connect_pipewire_and_run(
     Ok(())
 }
 
-fn convert_to_bgr(src: &[u8], si: &StreamInfo, actual_stride: u32, _bytes_per_row: u32) -> Vec<u8> {
-    let mut bgr = vec![0u8; (si.width * si.height * 3) as usize];
+fn spa_to_pixel_format(fmt: SpaVideoFormatTag) -> PixelFormat {
+    match fmt {
+        SpaVideoFormatTag::Bgrx
+        | SpaVideoFormatTag::Bgra
+        | SpaVideoFormatTag::Xbgr
+        | SpaVideoFormatTag::Abgr => PixelFormat::Bgra,
+        SpaVideoFormatTag::Rgbx
+        | SpaVideoFormatTag::Rgba
+        | SpaVideoFormatTag::Xrgb
+        | SpaVideoFormatTag::Argb => PixelFormat::Rgba,
+        SpaVideoFormatTag::Bgr => PixelFormat::Bgr,
+        SpaVideoFormatTag::Rgb => PixelFormat::Rgb,
+        SpaVideoFormatTag::Other(_) => PixelFormat::Bgra,
+    }
+}
 
-    for y in 0..si.height {
-        let src_row_start = (y * actual_stride) as usize;
-        let dst_row_start = (y * si.width * 3) as usize;
+/// Fallback path for exotic layouts that need channel reordering into packed BGR.
+#[allow(dead_code)]
+fn convert_to_bgr_into(src: &[u8], si: &StreamInfo, actual_stride: u32, bgr: &mut Vec<u8>) {
+    let needed = (si.width * si.height * 3) as usize;
+    if bgr.len() != needed {
+        bgr.resize(needed, 0);
+    }
 
-        for x in 0..si.width {
-            let src_px = src_row_start + (x * si.format.bytes_per_pixel()) as usize;
-            let dst_px = dst_row_start + (x * 3) as usize;
+    let bpp = si.format.bytes_per_pixel() as usize;
+    let dst_stride = (si.width * 3) as usize;
+
+    for y in 0..si.height as usize {
+        let src_row_start = y * actual_stride as usize;
+        let dst_row_start = y * dst_stride;
+
+        for x in 0..si.width as usize {
+            let src_px = src_row_start + x * bpp;
+            let dst_px = dst_row_start + x * 3;
 
             if src_px + 3 >= src.len() || dst_px + 2 >= bgr.len() {
                 continue;
@@ -711,6 +771,4 @@ fn convert_to_bgr(src: &[u8], si: &StreamInfo, actual_stride: u32, _bytes_per_ro
             }
         }
     }
-
-    bgr
 }

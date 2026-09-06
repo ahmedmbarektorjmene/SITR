@@ -47,3 +47,8 @@ pub fn capture_screen_frame() -> Option<(FrameData, ScreenRect)> {
         }
     }
 }
+
+/// Last BGRX→BGR conversion time from the PipeWire thread (ms).
+pub fn last_capture_convert_ms() -> f64 {
+    CAPTURER.get().map(|c| c.last_convert_ms()).unwrap_or(0.0)
+}

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::app_state::AppState;
 use crate::commands::CoreEvent;
-use inference::detector::{Detector, MockDetector, OpenCvDetector};
+use inference::detector::{Detector, MockDetector, OrtDetector};
 use overlay::compositor::{CpuOverlayRenderer, OverlayRenderer};
 #[cfg(not(target_os = "linux"))]
 use porda_capture::capturer::{PlatformCapturer, ScreenCapturer};
@@ -68,43 +68,34 @@ fn run_linux_pipeline(
     running: Arc<Mutex<bool>>,
 ) {
     let onnx_path = platform::onnx_model_path();
-    let (cfg_path, w_path) = platform::model_paths();
-    let detector: Box<dyn Detector> = if std::env::var("PORDA_MOCK_DETECTIONS").is_ok() {
+    let mut detector: Box<dyn Detector> = if std::env::var("PORDA_MOCK_DETECTIONS").is_ok() {
         tracing::info!("Pipeline: PORDA_MOCK_DETECTIONS set, using MockDetector for testing");
         Box::new(MockDetector)
     } else if onnx_path.exists() {
-        let device = std::env::var("inference_DEVICE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(inference::detector::InferenceDevice::Auto);
-        let d = OpenCvDetector::new(onnx_path.clone(), device);
-        tracing::info!(
-            "Pipeline: ONNX model found, using {} (onnx={:?} device={:?})",
-            d.backend_name(),
-            onnx_path,
-            device
-        );
-        Box::new(d)
-    } else if cfg_path.exists() && w_path.exists() {
-        tracing::warn!(
-            "Pipeline: ONNX not found at {:?}, falling back to legacy Darknet cfg/weights {:?}/{:?} (deprecated)",
-            onnx_path, cfg_path, w_path
-        );
-        let onnx_fallback = cfg_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("porda.onnx");
-        let d = OpenCvDetector::new(onnx_fallback, inference::detector::InferenceDevice::Auto);
-        Box::new(d)
+        match OrtDetector::new(&onnx_path) {
+            Ok(d) => {
+                tracing::info!(
+                    "Pipeline: ONNX model found, using {} (onnx={:?})",
+                    d.backend_name(),
+                    onnx_path
+                );
+                let boxed: Box<dyn Detector> = Box::new(d);
+                boxed
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Pipeline: OrtDetector failed ({}), falling back to MockDetector",
+                    e
+                );
+                let boxed: Box<dyn Detector> = Box::new(MockDetector);
+                boxed
+            }
+        }
     } else {
         tracing::info!(
-            "Pipeline: model not found (onnx={:?} exists={}, cfg={:?} exists={}, weights={:?} exists={}), using mock",
+            "Pipeline: model not found (onnx={:?} exists={}), using mock",
             onnx_path,
-            onnx_path.exists(),
-            cfg_path,
-            cfg_path.exists(),
-            w_path,
-            w_path.exists()
+            onnx_path.exists()
         );
         Box::new(MockDetector)
     };
@@ -212,15 +203,19 @@ fn run_linux_pipeline(
             state.detection_interval_ms()
         };
 
+        let t_capture = std::time::Instant::now();
         match platform::linux_screen_capture() {
             Some((frame, desktop_rect)) => {
+                let capture_ms = t_capture.elapsed().as_secs_f64() * 1000.0;
+                let convert_ms = platform::linux::last_capture_convert_ms();
                 tracing::info!(
-                    "Capture: frame {}x{} stride={} format={:?} rect={:?}",
+                    "PERF capture: retrieve={:.2}ms pw_raw_copy={:.2}ms | frame {}x{} stride={} format={:?}",
+                    capture_ms,
+                    convert_ms,
                     frame.width,
                     frame.height,
                     frame.stride,
-                    frame.format,
-                    desktop_rect
+                    frame.format
                 );
 
                 // Extract detector params with single lock to avoid dangling refs
@@ -234,12 +229,6 @@ fn run_linux_pipeline(
                         s.config.detection.network_height,
                     )
                 };
-                tracing::info!(
-                    "Pipeline: calling detector backend={} conf_thresh={:.2} target_classes={:?}",
-                    detector.backend_name(),
-                    conf_thresh,
-                    target_classes
-                );
 
                 let detections = match detector.detect(
                     &frame,
@@ -258,18 +247,30 @@ fn run_linux_pipeline(
                     }
                 };
 
-                tracing::info!("Detector: {} detections", detections.len());
-                for (i, det) in detections.iter().enumerate() {
-                    tracing::info!(
-                        "Detection[{}]: class={:?} conf={:.2} bbox=({},{},{},{})",
-                        i,
-                        det.class,
-                        det.confidence,
-                        det.screen_rect.x,
-                        det.screen_rect.y,
-                        det.screen_rect.width,
-                        det.screen_rect.height
-                    );
+                let detect_t = detector.last_timings();
+                tracing::info!(
+                    "PERF frame: capture={:.2}ms + detect={:.2}ms (pre={:.2} run={:.2} post={:.2}) dets={}",
+                    capture_ms,
+                    detect_t.total_ms,
+                    detect_t.preprocess_ms,
+                    detect_t.session_run_ms,
+                    detect_t.postprocess_ms,
+                    detections.len()
+                );
+
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    for (i, det) in detections.iter().enumerate() {
+                        tracing::debug!(
+                            "Detection[{}]: class={:?} conf={:.2} bbox=({},{},{},{})",
+                            i,
+                            det.class,
+                            det.confidence,
+                            det.screen_rect.x,
+                            det.screen_rect.y,
+                            det.screen_rect.width,
+                            det.screen_rect.height
+                        );
+                    }
                 }
 
                 let (covers, cover_time) = {
@@ -365,19 +366,28 @@ fn run_windows_pipeline(
 ) {
     let capturer = PlatformCapturer::new();
     let onnx_path = platform::onnx_model_path();
-    let detector: Box<dyn Detector> = if onnx_path.exists() {
-        let device = std::env::var("inference_DEVICE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(inference::detector::InferenceDevice::Auto);
-        Box::new(OpenCvDetector::new(onnx_path, device))
-    } else {
-        let (cfg_path, w_path) = platform::model_paths();
-        if cfg_path.exists() && w_path.exists() {
-            Box::new(OpenCvDetector::new_legacy_darknet(cfg_path, w_path))
-        } else {
-            Box::new(MockDetector)
+    let mut detector: Box<dyn Detector> = if onnx_path.exists() {
+        match OrtDetector::new(&onnx_path) {
+            Ok(d) => {
+                tracing::info!(
+                    "Windows Pipeline: using {} (onnx={:?})",
+                    d.backend_name(),
+                    onnx_path
+                );
+                let boxed: Box<dyn Detector> = Box::new(d);
+                boxed
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Windows Pipeline: OrtDetector failed ({}), using MockDetector",
+                    e
+                );
+                let boxed: Box<dyn Detector> = Box::new(MockDetector);
+                boxed
+            }
         }
+    } else {
+        Box::new(MockDetector)
     };
     let mut overlay = CpuOverlayRenderer::new(vision::geometry::ColorRgb::default());
 

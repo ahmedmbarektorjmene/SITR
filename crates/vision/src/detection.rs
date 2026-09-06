@@ -168,18 +168,64 @@ impl FrameData {
         if row_offset + 2 >= self.data.len() {
             return None;
         }
+        // Always returns RGB.
         match self.format {
-            PixelFormat::Bgr => Some([
+            PixelFormat::Bgr | PixelFormat::Bgra => Some([
                 self.data[row_offset + 2],
                 self.data[row_offset + 1],
                 self.data[row_offset],
             ]),
-            PixelFormat::Rgb => Some([
+            PixelFormat::Rgb | PixelFormat::Rgba => Some([
                 self.data[row_offset],
                 self.data[row_offset + 1],
                 self.data[row_offset + 2],
             ]),
-            _ => None,
+        }
+    }
+
+    /// Packed BGR bytes for a region (converts Bgra/Rgba crops on demand).
+    pub fn region_bgr(&self, rect: &ScreenRect) -> Option<Vec<u8>> {
+        let region = self.region(rect)?;
+        let n = (region.width * region.height) as usize;
+        match region.format {
+            PixelFormat::Bgr => Some(region.data),
+            PixelFormat::Rgb => {
+                let mut out = Vec::with_capacity(n * 3);
+                for c in region.data.chunks_exact(3) {
+                    out.push(c[2]);
+                    out.push(c[1]);
+                    out.push(c[0]);
+                }
+                Some(out)
+            }
+            PixelFormat::Bgra => {
+                let mut out = Vec::with_capacity(n * 3);
+                let bpp = 4usize;
+                for y in 0..region.height as usize {
+                    let row = y * region.stride as usize;
+                    for x in 0..region.width as usize {
+                        let i = row + x * bpp;
+                        out.push(region.data[i]);
+                        out.push(region.data[i + 1]);
+                        out.push(region.data[i + 2]);
+                    }
+                }
+                Some(out)
+            }
+            PixelFormat::Rgba => {
+                let mut out = Vec::with_capacity(n * 3);
+                let bpp = 4usize;
+                for y in 0..region.height as usize {
+                    let row = y * region.stride as usize;
+                    for x in 0..region.width as usize {
+                        let i = row + x * bpp;
+                        out.push(region.data[i + 2]);
+                        out.push(region.data[i + 1]);
+                        out.push(region.data[i]);
+                    }
+                }
+                Some(out)
+            }
         }
     }
 
@@ -262,19 +308,13 @@ pub fn extract_dominant_color(
     // Fallback for tiny/off-screen rects where subsampled window is empty:
     // exact counting over the whole rect (not quantized) to avoid panic,
     // still strictly from the same frame (no stale buffer).
-    let region = frame.region(rect)?;
-    if region.data.is_empty() {
+    let bgr = frame.region_bgr(rect)?;
+    if bgr.is_empty() {
         return None;
     }
     let mut fallback: HashMap<[u8; 3], u32> = HashMap::with_capacity(1024);
-    for chunk in region.data.chunks_exact(3) {
-        // region.data is BGR if frame was Bgr, else Rgb - need to map to RGB
-        let is_bgr = matches!(region.format, PixelFormat::Bgr);
-        let rgb = if is_bgr {
-            [chunk[2], chunk[1], chunk[0]]
-        } else {
-            [chunk[0], chunk[1], chunk[2]]
-        };
+    for chunk in bgr.chunks_exact(3) {
+        let rgb = [chunk[2], chunk[1], chunk[0]];
         *fallback.entry(rgb).or_insert(0) += 1;
     }
     if fallback.is_empty() {

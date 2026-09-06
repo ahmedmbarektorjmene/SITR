@@ -8,13 +8,23 @@ vision = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-wayland-client = "0.31"
-wayland-protocols = { version = "0.31", features = ["client"] }
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# Cross-platform rendering/utilities
 wgpu = "0.19"
 pollster = "0.3"
 raw-window-handle = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
 tempfile = "3"
 memmap2 = "0.9"
+
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }

@@ -1,7 +1,5 @@
 [env]
-OPENCV_PKGCONFIG_NAME = "opencv5"
 LIBCLANG_PATH = "/usr/lib"
-OPENCV_LINK_PATHS = "/home/torchi/.cache/opencv-win/lib"
 
 [target.x86_64-pc-windows-msvc]
 linker = "lld-link"
@@ -9,7 +7,5 @@ rustflags = [
     "-Lnative=/home/torchi/.xwin-cache/splat/crt/lib/x86_64",
     "-Lnative=/home/torchi/.xwin-cache/splat/sdk/lib/ucrt/x86_64",
     "-Lnative=/home/torchi/.xwin-cache/splat/sdk/lib/um/x86_64",
-    "-Lnative=/home/torchi/.cache/opencv-win/lib",
-    "-l", "opencv_missing",
     "-Ctarget-feature=+crt-static",
 ]
