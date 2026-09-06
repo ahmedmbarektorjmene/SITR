@@ -1,15 +1,15 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/porda-core",
-    "crates/porda-config",
-    "crates/porda-capture",
-    "crates/porda-inference",
-    "crates/porda-vision",
-    "crates/porda-overlay",
-    "crates/porda-platform",
-    "crates/porda-ui",
-    "crates/porda-tray",
+    "crates/core",
+    "crates/config",
+    "crates/capture",
+    "crates/inference",
+    "crates/vision",
+    "crates/overlay",
+    "crates/platform",
+    "crates/ui",
+    "crates/systray",
     "porda",
 ]
 
@@ -20,15 +20,15 @@ license = "AGPL-3.0"
 authors = ["Porda AI"]
 
 [workspace.dependencies]
-porda-core = { path = "crates/porda-core" }
-porda-config = { path = "crates/porda-config" }
-porda-capture = { path = "crates/porda-capture" }
-porda-inference = { path = "crates/porda-inference" }
-porda-vision = { path = "crates/porda-vision" }
-porda-overlay = { path = "crates/porda-overlay" }
-porda-platform = { path = "crates/porda-platform" }
-porda-ui = { path = "crates/porda-ui" }
-porda-tray = { path = "crates/porda-tray" }
+porda-core = { path = "crates/core" }
+config = { path = "crates/config" }
+capture = { path = "crates/capture" }
+inference = { path = "crates/inference" }
+vision = { path = "crates/vision" }
+overlay = { path = "crates/overlay" }
+platform = { path = "crates/platform" }
+ui = { path = "crates/ui" }
+systray = { path = "crates/systray" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

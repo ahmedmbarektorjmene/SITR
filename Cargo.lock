@@ -781,6 +781,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "capture"
+version = "3.0.0"
+dependencies = [
+ "platform",
+ "thiserror 2.0.20",
+ "tracing",
+ "vision",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -954,6 +964,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "config"
+version = "3.0.0"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "toml 0.8.23",
+ "tracing",
+ "vision",
 ]
 
 [[package]]
@@ -2657,6 +2680,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "opencv",
+ "thiserror 2.0.20",
+ "tracing",
+ "vision",
+]
+
+[[package]]
 name = "input"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3910,6 +3944,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "overlay"
+version = "3.0.0"
+dependencies = [
+ "bytemuck",
+ "memmap2 0.9.11",
+ "pollster",
+ "raw-window-handle",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "vision",
+ "wayland-client",
+ "wayland-protocols 0.31.2",
+ "wayland-protocols-wlr",
+ "wgpu",
+]
+
+[[package]]
 name = "owned_ttf_parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4143,6 +4195,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "platform"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "ashpd",
+ "config",
+ "dirs",
+ "image",
+ "pipewire",
+ "serde",
+ "serde_json",
+ "smithay-client-toolkit 0.19.2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "vision",
+ "wayland-client",
+ "wayland-protocols 0.31.2",
+ "wayland-protocols-wlr",
+ "windows 0.58.0",
+ "zbus",
+]
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4189,40 +4265,17 @@ name = "porda"
 version = "3.0.0"
 dependencies = [
  "anyhow",
- "porda-capture",
- "porda-config",
+ "capture",
+ "config",
+ "inference",
+ "overlay",
+ "platform",
  "porda-core",
- "porda-inference",
- "porda-overlay",
- "porda-platform",
- "porda-tray",
- "porda-ui",
- "porda-vision",
+ "systray",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "porda-capture"
-version = "3.0.0"
-dependencies = [
- "porda-platform",
- "porda-vision",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "porda-config"
-version = "3.0.0"
-dependencies = [
- "dirs",
- "porda-vision",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "toml 0.8.23",
- "tracing",
+ "ui",
+ "vision",
 ]
 
 [[package]]
@@ -4230,104 +4283,14 @@ name = "porda-core"
 version = "3.0.0"
 dependencies = [
  "anyhow",
- "porda-capture",
- "porda-config",
- "porda-inference",
- "porda-overlay",
- "porda-platform",
- "porda-vision",
+ "capture",
+ "config",
+ "inference",
+ "overlay",
+ "platform",
  "thiserror 2.0.20",
  "tracing",
-]
-
-[[package]]
-name = "porda-inference"
-version = "3.0.0"
-dependencies = [
- "anyhow",
- "opencv",
- "porda-vision",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "porda-overlay"
-version = "3.0.0"
-dependencies = [
- "bytemuck",
- "memmap2 0.9.11",
- "pollster",
- "porda-vision",
- "raw-window-handle",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "wayland-client",
- "wayland-protocols 0.31.2",
- "wayland-protocols-wlr",
- "wgpu",
-]
-
-[[package]]
-name = "porda-platform"
-version = "3.0.0"
-dependencies = [
- "anyhow",
- "ashpd",
- "dirs",
- "image",
- "pipewire",
- "porda-config",
- "porda-vision",
- "serde",
- "serde_json",
- "smithay-client-toolkit 0.19.2",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "wayland-client",
- "wayland-protocols 0.31.2",
- "wayland-protocols-wlr",
- "windows 0.58.0",
- "zbus",
-]
-
-[[package]]
-name = "porda-tray"
-version = "3.0.0"
-dependencies = [
- "anyhow",
- "ksni",
- "porda-config",
- "porda-core",
- "porda-platform",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "porda-ui"
-version = "3.0.0"
-dependencies = [
- "anyhow",
- "porda-config",
- "porda-core",
- "porda-vision",
- "slint",
- "slint-build",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "porda-vision"
-version = "3.0.0"
-dependencies = [
- "image",
- "serde",
- "thiserror 2.0.20",
- "tracing",
+ "vision",
 ]
 
 [[package]]
@@ -5476,6 +5439,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "systray"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "ksni",
+ "platform",
+ "porda-core",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "taffy"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5933,6 +5909,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui"
+version = "3.0.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "porda-core",
+ "slint",
+ "slint-build",
+ "thiserror 2.0.20",
+ "tracing",
+ "vision",
+]
+
+[[package]]
 name = "unicase"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6107,6 +6097,16 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vision"
+version = "3.0.0"
+dependencies = [
+ "image",
+ "serde",
+ "thiserror 2.0.20",
+ "tracing",
+]
 
 [[package]]
 name = "vtable"

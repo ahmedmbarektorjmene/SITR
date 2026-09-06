@@ -26,7 +26,7 @@ Default Cargo features now include `opencv` so `cargo run` uses OpenCV 5 without
 ```bash
 cargo check --workspace
 cargo test --workspace
-cargo test -p porda-inference   # includes ONNX load + CPU inference
+cargo test -p inference   # includes ONNX load + CPU inference
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
@@ -56,22 +56,22 @@ FrameData (BGR)
 Thresholds: `confidence 0.25`, `nms 0.10`, target `Female` by default (`is_detect_female=true`).
 
 ## Tests
-- `porda-vision` 18: `resize_and_pad` exact dimensions, early-return 1920×1200→1,1, `nms`, `cover`, `geometry`.
-- `porda-inference` 9 (default opencv): `porda.onnx` exists, loads, CPU deterministic, early-return, `Auto` GPU fallback, class filtering.
+- `vision` 18: `resize_and_pad` exact dimensions, early-return 1920×1200→1,1, `nms`, `cover`, `geometry`.
+- `inference` 9 (default opencv): `porda.onnx` exists, loads, CPU deterministic, early-return, `Auto` GPU fallback, class filtering.
 - `cargo test --workspace` 33 tests.
 - Python harness `scripts/equivalence_test.py` compares Darknet (OpenCV 4 `readNetFromDarknet` raw `conv_29/36`) vs ONNX (OpenCV 5 raw) mean abs diff 0.00034 max 0.003, decoded boxes within 2 px.
 
 ## Benchmark
-`cargo run -p porda-inference --example bench` (100 iters, 544×320, CPU):
+`cargo run -p inference --example bench` (100 iters, 544×320, CPU):
 - Load 43 ms, avg 69 ms (14.5 FPS). Darknet (OpenCV 4) 69.7 ms on same blob.
 
-`cargo run -p porda-inference --example lena` on 512×512 Lena → 1 Female 78,155,308,345 conf 0.758 (Darknet letterbox 80,155,308,345 diff 2 px).
+`cargo run -p inference --example lena` on 512×512 Lena → 1 Female 78,155,308,345 conf 0.758 (Darknet letterbox 80,155,308,345 diff 2 px).
 
 ## Device
-`InferenceDevice::Auto` → GPU if `have_opencl()` else CPU. `Cpu`/`Gpu` explicit, `Gpu` falls back to CPU if unavailable. `PORDA_INFERENCE_DEVICE=cpu|gpu|auto`.
+`InferenceDevice::Auto` → GPU if `have_opencl()` else CPU. `Cpu`/`Gpu` explicit, `Gpu` falls back to CPU if unavailable. `inference_DEVICE=cpu|gpu|auto`.
 
 ## Wayland Overlay
-`porda-overlay::WaylandOverlay` if compositor advertises `zwlr_layer_shell_v1`; else `CpuOverlayRenderer` stub. With `PORDA_MOCK_DETECTIONS=1 PORDA_FORCE_ACTIVE=1` generates synthetic 300×200 center cover and `ShmRenderer` renders.
+`overlay::WaylandOverlay` if compositor advertises `zwlr_layer_shell_v1`; else `CpuOverlayRenderer` stub. With `PORDA_MOCK_DETECTIONS=1 PORDA_FORCE_ACTIVE=1` generates synthetic 300×200 center cover and `ShmRenderer` renders.
 
 ## License
 AGPL-3.0. See `LICENSE`.

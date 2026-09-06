@@ -1,26 +1,15 @@
 [package]
-name = "porda"
+name = "porda-core"
 version.workspace = true
 edition.workspace = true
 
-[[bin]]
-name = "porda"
-path = "src/main.rs"
-
 [dependencies]
-porda-core = { workspace = true }
 config = { workspace = true }
+vision = { workspace = true }
 capture = { workspace = true }
 inference = { workspace = true }
-vision = { workspace = true }
 overlay = { workspace = true }
 platform = { workspace = true }
-ui = { workspace = true }
-systray = { workspace = true }
+thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-
-[features]
-default = ["opencv"]
-opencv = ["inference/opencv"]

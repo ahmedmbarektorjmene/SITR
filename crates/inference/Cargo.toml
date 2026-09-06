@@ -1,0 +1,20 @@
+[package]
+name = "inference"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vision = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = ["opencv"]
+opencv = ["dep:opencv"]
+
+[dependencies.opencv]
+version = "0.100"
+default-features = false
+features = ["dnn", "imgproc", "imgcodecs", "clang-runtime"]
+optional = true

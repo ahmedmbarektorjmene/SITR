@@ -1,0 +1,12 @@
+[package]
+name = "capture"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+platform = { workspace = true }
+vision = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]

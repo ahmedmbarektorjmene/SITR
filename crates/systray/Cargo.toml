@@ -1,0 +1,13 @@
+[package]
+name = "systray"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+porda-core = { workspace = true }
+config = { workspace = true }
+platform = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }

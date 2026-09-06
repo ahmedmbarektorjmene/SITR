@@ -1,0 +1,53 @@
+use config::settings::PordaConfig;
+
+#[derive(Debug, Clone)]
+pub enum UiCommand {
+    SaveSettings,
+    LoadSettings(PordaConfig),
+    RestoreDefaults,
+    Activate,
+    Deactivate,
+    ToggleActivation,
+    ApplySettings(PordaConfig),
+    Terminate,
+    TakeScreenshot,
+    RefreshHotkeys,
+    RefreshOverlay,
+    SetDetectionEnabled(bool),
+    SetCoverBlur(bool),
+    SetCoverBackgroundColor(bool),
+    SetCoverSolidColor(bool),
+    SetRgbColor(u8, u8, u8),
+    SetAccuracy(u8),
+    SetNetworkWidth(u32),
+    SetNetworkHeight(u32),
+    SetActiveTimeout(u64),
+    SetSleepTimeout(u64),
+    SetKeepRunningSeconds(u64),
+    SetEngine(String),
+    SetDetectMale(bool),
+    SetDetectFemale(bool),
+    SetIncludeWindows(Vec<String>),
+    SetExcludeWindows(Vec<String>),
+    SetAutoStartup(bool),
+    SetRealtimePriority(bool),
+    SetCpuLimitEnabled(bool),
+    SetMaxCpuLimit(u8),
+    SetToggleKey(String),
+    SetScreenshotKey(String),
+    SetIsAllWindows(bool),
+    SetIsIncludeWindow(bool),
+    SetIsExcludeWindow(bool),
+}
+
+#[derive(Debug, Clone)]
+pub enum CoreEvent {
+    DetectionStateChange(vision::detection::DetectionState),
+    CpuUsageUpdate(f32),
+    CoversUpdated(Vec<vision::detection::CoverRect>),
+    ScreenshotTaken(std::path::PathBuf),
+    Error(String),
+    ConfigSaved,
+    ConfigLoaded(PordaConfig),
+    Terminated,
+}
