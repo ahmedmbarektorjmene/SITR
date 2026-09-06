@@ -540,35 +540,55 @@ mod windows_impl {
     }
 
     pub fn add_startup_registry() -> Result<(), Box<dyn std::error::Error>> {
+        use windows::Win32::Foundation::ERROR_SUCCESS;
         use windows::Win32::System::Registry::*;
         unsafe {
             let exe_path = std::env::current_exe()?;
             let value = format!("\"{}\" --startup_by_windows", exe_path.display());
 
-            let mut key = HKEY_CURRENT_USER;
             let mut result_key = HKEY::default();
             let reg_path = windows::core::PCWSTR(
                 windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run").as_ptr(),
             );
 
-            RegOpenKeyExW(key, reg_path, 0, KEY_SET_VALUE, &mut result_key)?;
+            let status = RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                reg_path,
+                0,
+                KEY_SET_VALUE,
+                &mut result_key,
+            );
+            if status != ERROR_SUCCESS {
+                return Err(format!("RegOpenKeyExW failed: {:?}", status).into());
+            }
 
             let value_wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-            RegSetValueExW(
+            let data = std::slice::from_raw_parts(
+                value_wide.as_ptr() as *const u8,
+                value_wide.len() * 2,
+            );
+            let status = RegSetValueExW(
                 result_key,
                 windows::core::PCWSTR(windows::core::w!("PordaAi").as_ptr()),
                 0,
                 REG_SZ,
-                value_wide.as_ptr() as _,
-                (value_wide.len() * 2) as u32,
-            )?;
+                Some(data),
+            );
+            if status != ERROR_SUCCESS {
+                let _ = RegCloseKey(result_key);
+                return Err(format!("RegSetValueExW failed: {:?}", status).into());
+            }
 
-            RegCloseKey(result_key)?;
+            let status = RegCloseKey(result_key);
+            if status != ERROR_SUCCESS {
+                return Err(format!("RegCloseKey failed: {:?}", status).into());
+            }
             Ok(())
         }
     }
 
     pub fn remove_startup_registry() -> Result<(), Box<dyn std::error::Error>> {
+        use windows::Win32::Foundation::ERROR_SUCCESS;
         use windows::Win32::System::Registry::*;
         unsafe {
             let mut result_key = HKEY::default();
@@ -576,20 +596,30 @@ mod windows_impl {
                 windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run").as_ptr(),
             );
 
-            RegOpenKeyExW(
+            let status = RegOpenKeyExW(
                 HKEY_CURRENT_USER,
                 reg_path,
                 0,
                 KEY_SET_VALUE,
                 &mut result_key,
-            )?;
+            );
+            if status != ERROR_SUCCESS {
+                return Err(format!("RegOpenKeyExW failed: {:?}", status).into());
+            }
 
-            RegDeleteValueW(
+            let status = RegDeleteValueW(
                 result_key,
                 windows::core::PCWSTR(windows::core::w!("PordaAi").as_ptr()),
-            )?;
+            );
+            if status != ERROR_SUCCESS {
+                let _ = RegCloseKey(result_key);
+                return Err(format!("RegDeleteValueW failed: {:?}", status).into());
+            }
 
-            RegCloseKey(result_key)?;
+            let status = RegCloseKey(result_key);
+            if status != ERROR_SUCCESS {
+                return Err(format!("RegCloseKey failed: {:?}", status).into());
+            }
             Ok(())
         }
     }
@@ -622,8 +652,12 @@ mod windows_impl {
         None
     }
 
-    pub fn get_monitors() -> Vec<ScreenRect> {
-        vec![ScreenRect::new(0, 0, 1920, 1080)]
+    pub fn get_monitors() -> Vec<MonitorInfo> {
+        vec![MonitorInfo {
+            bounds: ScreenRect::new(0, 0, 1920, 1080),
+            work_area: ScreenRect::new(0, 0, 1920, 1080),
+            is_primary: true,
+        }]
     }
 
     pub fn list_windows(
