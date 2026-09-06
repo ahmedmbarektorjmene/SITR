@@ -53,8 +53,7 @@ impl ScreenCapturer for PlatformCapturer {
         exclude: &[String],
         always_skip: &[(String, String)],
     ) -> Result<CapturedFrame, CaptureError> {
-        let hwnd =
-            platform::get_foreground_window().ok_or(CaptureError::NoForegroundWindow)?;
+        let hwnd = platform::get_foreground_window().ok_or(CaptureError::NoForegroundWindow)?;
 
         let process_name = platform::get_window_process_name(hwnd).unwrap_or_default();
 

@@ -119,51 +119,92 @@ pub fn nms(boxes: &mut Vec<ScreenRect>, scores: &mut Vec<f32>, threshold: f32) {
     scores.truncate(write_idx);
 }
 
-#[allow(clippy::manual_checked_ops)]
+/// Box blur mimicking Python `cv2.blur(image, (k,k))` where `k = w // 2`.
+/// Uses integral image for O(w*h) performance regardless of kernel size.
+/// Kernel is clamped to `width`/`height` and preserves BGR ordering.
 pub fn blur_region(data: &[u8], width: u32, height: u32) -> Vec<u8> {
     if data.is_empty() || width == 0 || height == 0 {
         return vec![];
     }
+    if data.len() < (width * height * 3) as usize {
+        return vec![];
+    }
 
-    let kernel = (width / 2).max(1);
-    let mut output = vec![0u8; data.len()];
+    // Python: k = w // 2 . Ensure odd-ish but OpenCV allows even.
+    let mut k = (width / 2).max(1);
+    // Clamp to region size to avoid degenerate windows
+    k = k.min(width).min(height);
+    if k <= 1 {
+        // 1x1 kernel = no-op, return clone to avoid modifying original
+        return data.to_vec();
+    }
+    // Ensure kernel >=1 and handle even: use k as window size (OpenCV blur k x k)
+    // Window for pixel (x,y) is [x - k/2 , x + k/2 + k%2)
+    let half = (k / 2) as i32;
+    let tail = (k - k / 2) as i32; // handles even/odd correctly
 
-    for y in 0..height {
-        for x in 0..width {
-            let mut r_sum: u32 = 0;
-            let mut g_sum: u32 = 0;
-            let mut b_sum: u32 = 0;
-            let mut count: u32 = 0;
+    let w = width as usize;
+    let h = height as usize;
 
-            let ky_start = y.saturating_sub(kernel);
-            let ky_end = (y + kernel + 1).min(height);
-            let kx_start = x.saturating_sub(kernel);
-            let kx_end = (x + kernel + 1).min(width);
+    // Integral images for B,G,R (u64 to avoid overflow: max 255*1920*1200 ~589M fits u32 but use u64)
+    let iw = w + 1;
+    let ih = h + 1;
+    let size = iw * ih;
+    let mut int_b = vec![0u64; size];
+    let mut int_g = vec![0u64; size];
+    let mut int_r = vec![0u64; size];
 
-            for ky in ky_start..ky_end {
-                for kx in kx_start..kx_end {
-                    let idx = ((ky * width + kx) * 3) as usize;
-                    if idx + 2 < data.len() {
-                        b_sum += data[idx] as u32;
-                        g_sum += data[idx + 1] as u32;
-                        r_sum += data[idx + 2] as u32;
-                        count += 1;
-                    }
-                }
-            }
-
-            if count > 0 {
-                let idx = ((y * width + x) * 3) as usize;
-                if idx + 2 < output.len() {
-                    output[idx] = (b_sum / count) as u8;
-                    output[idx + 1] = (g_sum / count) as u8;
-                    output[idx + 2] = (r_sum / count) as u8;
-                }
-            }
+    // Build integral: int[y+1][x+1] = sum of rect (0,0)-(x,y)
+    for y in 0..h {
+        let mut row_b: u64 = 0;
+        let mut row_g: u64 = 0;
+        let mut row_r: u64 = 0;
+        for x in 0..w {
+            let idx = (y * w + x) * 3;
+            let b = data[idx] as u64;
+            let g = data[idx + 1] as u64;
+            let r = data[idx + 2] as u64;
+            row_b += b;
+            row_g += g;
+            row_r += r;
+            let pos = (y + 1) * iw + (x + 1);
+            let above = y * iw + (x + 1);
+            int_b[pos] = int_b[above] + row_b;
+            int_g[pos] = int_g[above] + row_g;
+            int_r[pos] = int_r[above] + row_r;
         }
     }
 
-    output
+    let mut out = vec![0u8; data.len()];
+
+    for y in 0..h {
+        let y0 = (y as i32 - half).max(0) as usize;
+        let y1 = (y as i32 + tail).min(h as i32) as usize;
+        for x in 0..w {
+            let x0 = (x as i32 - half).max(0) as usize;
+            let x1 = (x as i32 + tail).min(w as i32) as usize;
+
+            let area = ((x1 - x0) * (y1 - y0)) as u64;
+            if area == 0 {
+                continue;
+            }
+            // Integral rect sum: I[y1][x1] - I[y0][x1] - I[y1][x0] + I[y0][x0]
+            let a = y1 * iw + x1;
+            let b = y0 * iw + x1;
+            let c = y1 * iw + x0;
+            let d = y0 * iw + x0;
+            let sum_b = int_b[a] + int_b[d] - int_b[b] - int_b[c];
+            let sum_g = int_g[a] + int_g[d] - int_g[b] - int_g[c];
+            let sum_r = int_r[a] + int_r[d] - int_r[b] - int_r[c];
+
+            let idx = (y * w + x) * 3;
+            out[idx] = (sum_b / area) as u8;
+            out[idx + 1] = (sum_g / area) as u8;
+            out[idx + 2] = (sum_r / area) as u8;
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]

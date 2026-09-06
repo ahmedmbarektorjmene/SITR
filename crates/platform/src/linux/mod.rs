@@ -14,9 +14,9 @@ pub use startup::*;
 pub use system::*;
 pub use windows::*;
 
+use std::sync::OnceLock;
 use vision::detection::FrameData;
 use vision::geometry::ScreenRect;
-use std::sync::OnceLock;
 
 static CAPTURER: OnceLock<capture::LinuxScreenCapturer> = OnceLock::new();
 

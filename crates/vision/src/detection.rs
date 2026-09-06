@@ -45,6 +45,46 @@ pub enum CoverMode {
 pub struct CoverRect {
     pub screen_rect: ScreenRect,
     pub mode: CoverMode,
+    /// Resolved solid/dominant color (ARGB 217 alpha handled by renderer).
+    pub resolved_color: Option<crate::geometry::ColorRgb>,
+    /// Blurred pixel data (BGR, width*height*3) for blur mode.
+    pub blur_data: Option<Vec<u8>>,
+}
+
+impl CoverRect {
+    pub fn new_solid(rect: ScreenRect, color: crate::geometry::ColorRgb) -> Self {
+        Self {
+            screen_rect: rect,
+            mode: CoverMode::SolidColor,
+            resolved_color: Some(color),
+            blur_data: None,
+        }
+    }
+    pub fn new_dominant(rect: ScreenRect, color: crate::geometry::ColorRgb) -> Self {
+        Self {
+            screen_rect: rect,
+            mode: CoverMode::BackgroundColor,
+            resolved_color: Some(color),
+            blur_data: None,
+        }
+    }
+    pub fn new_blur(rect: ScreenRect, blurred_bgr: Vec<u8>) -> Self {
+        Self {
+            screen_rect: rect,
+            mode: CoverMode::Blur,
+            resolved_color: None,
+            blur_data: Some(blurred_bgr),
+        }
+    }
+    /// Fallback: mode only (used by legacy tests where color not checked)
+    pub fn new_mode_only(rect: ScreenRect, mode: CoverMode) -> Self {
+        Self {
+            screen_rect: rect,
+            mode,
+            resolved_color: None,
+            blur_data: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -171,55 +211,81 @@ impl FrameData {
     }
 }
 
+/// Port of Python `Porda-AI-python/main.py:655-659`:
+/// ```python
+/// pixels = frame[y+20:y+80:3, x:x+50:3, ::-1].reshape(-1, 3)
+/// unique_colors, counts = np.unique(pixels, axis=0, return_counts=True)
+/// dominant_color = unique_colors[np.argmax(counts)]
+/// ```
+/// Exact subsampled region (60x50 window at top-left of detection) -> exact RGB counting.
+/// Returns `None` if the subsampled window yields no pixels (e.g. tiny / off-screen rect),
+/// caller should fallback to solid.
 pub fn extract_dominant_color(
     frame: &FrameData,
     rect: &ScreenRect,
 ) -> Option<crate::geometry::ColorRgb> {
-    let region = frame.region(rect)?;
+    use std::collections::HashMap;
 
-    if region.data.is_empty() {
-        return None;
-    }
+    // Python fixed window: y+20..y+80 step3, x..x+50 step3 (exclusive end)
+    let start_y = rect.y + 20;
+    let end_y = rect.y + 80;
+    let start_x = rect.x;
+    let end_x = rect.x + 50;
 
-    let mut histogram = [[0u32; 32]; 32 * 32];
-    let _pixel_count = (region.width * region.height) as usize;
+    let mut counts: HashMap<[u8; 3], u32> = HashMap::with_capacity(512);
 
-    for i in (0..region.data.len()).step_by(3) {
-        let b = region.data[i] as usize;
-        let g = region.data[i + 1] as usize;
-        let r = region.data[i + 2] as usize;
-
-        let ri = r >> 3;
-        let gi = g >> 3;
-        let bi = b >> 3;
-        let idx = (ri * 32 + gi) * 32 + bi;
-        histogram[idx][0] += 1;
-        histogram[idx][1] += r as u32;
-        histogram[idx][2] += g as u32;
-    }
-
-    let mut best_idx = 0;
-    let mut best_count = 0;
-    for (i, entry) in histogram.iter().enumerate() {
-        if entry[0] > best_count {
-            best_count = entry[0];
-            best_idx = i;
+    // Collect subsampled pixels as RGB (Python `::-1` converts BGR->RGB)
+    for y in (start_y..end_y).step_by(3) {
+        if y < 0 || y >= frame.height as i32 {
+            continue;
+        }
+        for x in (start_x..end_x).step_by(3) {
+            if x < 0 || x >= frame.width as i32 {
+                continue;
+            }
+            // `pixel_at` already returns RGB regardless of Bgr/Rgb format
+            if let Some(rgb) = frame.pixel_at(x as u32, y as u32) {
+                *counts.entry(rgb).or_insert(0) += 1;
+            }
         }
     }
 
-    if best_count == 0 {
-        return None;
+    if !counts.is_empty() {
+        let (&dominant, _) = counts.iter().max_by_key(|(_, &c)| c).unwrap();
+        return Some(crate::geometry::ColorRgb::new(
+            dominant[0],
+            dominant[1],
+            dominant[2],
+        ));
     }
 
-    let ri = best_idx / (32 * 32);
-    let gi = (best_idx / 32) % 32;
-    let bi = best_idx % 32;
-
-    let r = ((ri as u32 * 32 + 16) * 255 / (31 * 32 + 16)).min(255) as u8;
-    let g = ((gi as u32 * 32 + 16) * 255 / (31 * 32 + 16)).min(255) as u8;
-    let b = ((bi as u32 * 32 + 16) * 255 / (31 * 32 + 16)).min(255) as u8;
-
-    Some(crate::geometry::ColorRgb::new(r, g, b))
+    // Fallback for tiny/off-screen rects where subsampled window is empty:
+    // exact counting over the whole rect (not quantized) to avoid panic,
+    // still strictly from the same frame (no stale buffer).
+    let region = frame.region(rect)?;
+    if region.data.is_empty() {
+        return None;
+    }
+    let mut fallback: HashMap<[u8; 3], u32> = HashMap::with_capacity(1024);
+    for chunk in region.data.chunks_exact(3) {
+        // region.data is BGR if frame was Bgr, else Rgb - need to map to RGB
+        let is_bgr = matches!(region.format, PixelFormat::Bgr);
+        let rgb = if is_bgr {
+            [chunk[2], chunk[1], chunk[0]]
+        } else {
+            [chunk[0], chunk[1], chunk[2]]
+        };
+        *fallback.entry(rgb).or_insert(0) += 1;
+    }
+    if fallback.is_empty() {
+        return None;
+    }
+    let (&dominant, _) = fallback.iter().max_by_key(|(_, &c)| c).unwrap();
+    Some(crate::geometry::ColorRgb::new(
+        dominant[0],
+        dominant[1],
+        dominant[2],
+    ))
 }
 
 #[cfg(test)]

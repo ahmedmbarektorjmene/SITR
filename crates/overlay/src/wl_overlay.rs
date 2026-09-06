@@ -27,7 +27,7 @@ impl Default for OverlayConfig {
 }
 
 enum OverlayCommand {
-    UpdateCovers(Vec<CoverRect>, ColorRgb),
+    UpdateCovers(Vec<CoverRect>),
     Clear,
     Shutdown,
 }
@@ -35,6 +35,7 @@ enum OverlayCommand {
 pub struct WaylandOverlay {
     tx: mpsc::Sender<OverlayCommand>,
     capability: OverlayCapability,
+    #[allow(dead_code)]
     solid_color: ColorRgb,
 }
 
@@ -67,19 +68,18 @@ impl WaylandOverlay {
     pub fn with_test_rect(config: OverlayConfig) -> Self {
         let overlay = Self::new(config.clone(), ColorRgb::new(255, 0, 0));
         if overlay.capability.is_supported() {
-            let test_rect = CoverRect {
-                screen_rect: ScreenRect::new(
+            let test_rect = CoverRect::new_solid(
+                ScreenRect::new(
                     (config.width as i32 / 2) - 150,
                     (config.height as i32 / 2) - 100,
                     300,
                     200,
                 ),
-                mode: vision::detection::CoverMode::SolidColor,
-            };
-            let _ = overlay.tx.send(OverlayCommand::UpdateCovers(
-                vec![test_rect],
                 ColorRgb::new(255, 0, 0),
-            ));
+            );
+            let _ = overlay
+                .tx
+                .send(OverlayCommand::UpdateCovers(vec![test_rect]));
             tracing::info!("Test rectangle sent: 300x200 at center");
         }
         overlay
@@ -373,15 +373,15 @@ fn run_overlay_thread(
     // Check for test rect env flag
     let has_test_rect = std::env::var("overlay_TEST_RECT").is_ok();
     if has_test_rect {
-        let test_rect = CoverRect {
-            screen_rect: ScreenRect::new(
+        let test_rect = CoverRect::new_solid(
+            ScreenRect::new(
                 (config.width as i32 / 2) - 150,
                 (config.height as i32 / 2) - 100,
                 300,
                 200,
             ),
-            mode: vision::detection::CoverMode::SolidColor,
-        };
+            ColorRgb::new(255, 0, 0),
+        );
         state.pending_covers = vec![test_rect];
         state.solid_color = ColorRgb::new(255, 0, 0);
         state.needs_redraw = true;
@@ -395,25 +395,22 @@ fn run_overlay_thread(
         // Handle overlay commands (non-blocking)
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                OverlayCommand::UpdateCovers(covers, color) => {
-                    tracing::info!(
-                        "Overlay: received UpdateCovers count={} color={:?}",
-                        covers.len(),
-                        color
-                    );
+                OverlayCommand::UpdateCovers(covers) => {
+                    tracing::info!("Overlay: received UpdateCovers count={}", covers.len());
                     for (i, c) in covers.iter().enumerate() {
                         tracing::info!(
-                            "Overlay: Cover[{}] x={} y={} w={} h={} mode={:?}",
+                            "Overlay: Cover[{}] x={} y={} w={} h={} mode={:?} resolved_color={:?} has_blur={}",
                             i,
                             c.screen_rect.x,
                             c.screen_rect.y,
                             c.screen_rect.width,
                             c.screen_rect.height,
-                            c.mode
+                            c.mode,
+                            c.resolved_color,
+                            c.blur_data.is_some()
                         );
                     }
                     state.pending_covers = covers;
-                    state.solid_color = color;
                     state.needs_redraw = true;
                 }
                 OverlayCommand::Clear => {
@@ -439,11 +436,22 @@ fn run_overlay_thread(
 
         if state.needs_redraw {
             let covers = state.pending_covers.clone();
-            let color = state.solid_color;
-
-            if let Err(e) = renderer.render(&covers, color, &config) {
+            let render_start = std::time::Instant::now();
+            let cover_count = covers.len();
+            let pixel_count: usize = covers
+                .iter()
+                .map(|c| (c.screen_rect.width * c.screen_rect.height) as usize)
+                .sum();
+            if let Err(e) = renderer.render(&covers, &config) {
                 tracing::error!("Overlay render failed: {}", e);
             } else {
+                let elapsed = render_start.elapsed();
+                tracing::debug!(
+                    "Overlay: render took {:?} covers={} pixels={}",
+                    elapsed,
+                    cover_count,
+                    pixel_count
+                );
                 frame_count += 1;
                 surface.commit();
                 queue.flush().ok();
@@ -771,12 +779,7 @@ impl wayland_client::Dispatch<wayland_client::protocol::wl_buffer::WlBuffer, ()>
 // ---------------------------------------------------------------------------
 
 trait Renderer: Send {
-    fn render(
-        &mut self,
-        covers: &[CoverRect],
-        color: ColorRgb,
-        config: &OverlayConfig,
-    ) -> Result<(), String>;
+    fn render(&mut self, covers: &[CoverRect], config: &OverlayConfig) -> Result<(), String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -806,12 +809,7 @@ fn try_init_wgpu(
 }
 
 impl Renderer for WgpuRenderer {
-    fn render(
-        &mut self,
-        covers: &[CoverRect],
-        color: ColorRgb,
-        config: &OverlayConfig,
-    ) -> Result<(), String> {
+    fn render(&mut self, covers: &[CoverRect], config: &OverlayConfig) -> Result<(), String> {
         let output = self
             .surface
             .get_current_texture()
@@ -826,13 +824,17 @@ impl Renderer for WgpuRenderer {
                 label: Some("overlay-encoder"),
             });
 
-        // Update uniform: [width, height, r, g, b, a, 0, 0]
+        // Update uniform: use first cover color if available, else transparent
+        let first_color = covers
+            .first()
+            .and_then(|c| c.resolved_color)
+            .unwrap_or(ColorRgb::new(255, 0, 0));
         let full_uniform: [f32; 8] = [
             config.width as f32,
             config.height as f32,
-            color.r as f32 / 255.0,
-            color.g as f32 / 255.0,
-            color.b as f32 / 255.0,
+            first_color.r as f32 / 255.0,
+            first_color.g as f32 / 255.0,
+            first_color.b as f32 / 255.0,
             0.85,
             0.0,
             0.0,
@@ -966,25 +968,41 @@ impl ShmRenderer {
 }
 
 impl Renderer for ShmRenderer {
-    fn render(
-        &mut self,
-        covers: &[CoverRect],
-        color: ColorRgb,
-        _config: &OverlayConfig,
-    ) -> Result<(), String> {
+    fn render(&mut self, covers: &[CoverRect], _config: &OverlayConfig) -> Result<(), String> {
+        let cover_count = covers.len();
+        let pixel_count: usize = covers
+            .iter()
+            .map(|c| (c.screen_rect.width * c.screen_rect.height) as usize)
+            .sum();
         tracing::info!(
-            "ShmRenderer: rendering {} covers {}x{} color {:?}",
-            covers.len(),
+            "ShmRenderer: rendering {} covers ({} pixels) {}x{}",
+            cover_count,
+            pixel_count,
             self.width,
-            self.height,
-            color
+            self.height
         );
+        for (i, c) in covers.iter().enumerate() {
+            tracing::debug!(
+                "ShmRenderer: cover[{}] {:?} resolved={:?} blur={}",
+                i,
+                c.screen_rect,
+                c.resolved_color,
+                c.blur_data.is_some()
+            );
+        }
         use std::os::fd::AsFd;
 
         let stride = (self.width * 4) as i32;
         let size = (stride as u32 * self.height) as usize;
 
-        let data = build_shm_argb_data(covers, color, self.width, self.height);
+        let start = std::time::Instant::now();
+        let data = build_shm_argb_data_from_covers(covers, self.width, self.height);
+        let elapsed = start.elapsed();
+        tracing::debug!(
+            "ShmRenderer: build_shm_argb_data took {:?} for {} covers",
+            elapsed,
+            cover_count
+        );
 
         // Create shm file via tempfile
         let mut file = tempfile::tempfile().map_err(|e| format!("tempfile: {}", e))?;
@@ -1021,19 +1039,19 @@ impl Renderer for ShmRenderer {
         self.buffer = Some(buffer);
 
         tracing::debug!(
-            "ShmRenderer: rendered {} covers {}x{} color {:?}",
-            covers.len(),
+            "ShmRenderer: rendered {} covers {}x{} time={:?}",
+            cover_count,
             self.width,
             self.height,
-            color
+            start.elapsed()
         );
         Ok(())
     }
 }
 
-pub(crate) fn build_shm_argb_data(
+/// New API: build ARGB buffer from per-cover data (solid/dominant color + blur pixels).
+pub(crate) fn build_shm_argb_data_from_covers(
     covers: &[CoverRect],
-    color: ColorRgb,
     width: u32,
     height: u32,
 ) -> Vec<u8> {
@@ -1041,26 +1059,102 @@ pub(crate) fn build_shm_argb_data(
     let size = (stride * height) as usize;
     let mut data = vec![0u8; size];
     for cover in covers {
-        let r = &cover.screen_rect;
-        let x0 = r.x.max(0) as u32;
-        let y0 = r.y.max(0) as u32;
-        let x1 = (r.x + r.width as i32).max(0) as u32;
-        let y1 = (r.y + r.height as i32).max(0) as u32;
+        let rect = &cover.screen_rect;
+        // Clipped destination bounds
+        let x0 = rect.x.max(0) as u32;
+        let y0 = rect.y.max(0) as u32;
+        let x1 = (rect.x + rect.width as i32).max(0) as u32;
+        let y1 = (rect.y + rect.height as i32).max(0) as u32;
         let x1 = x1.min(width);
         let y1 = y1.min(height);
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let offset = (y * width * 4 + x * 4) as usize;
-                if offset + 3 < data.len() {
-                    data[offset] = color.b;
-                    data[offset + 1] = color.g;
-                    data[offset + 2] = color.r;
-                    data[offset + 3] = 217;
+        if x0 >= x1 || y0 >= y1 {
+            continue;
+        }
+        match cover.mode {
+            vision::detection::CoverMode::Blur => {
+                if let Some(blur) = &cover.blur_data {
+                    let rw = rect.width as usize;
+                    let rh = rect.height as usize;
+                    if blur.len() < rw * rh * 3 {
+                        continue;
+                    }
+                    for oy in y0..y1 {
+                        for ox in x0..x1 {
+                            let src_x = (ox as i32 - rect.x) as usize;
+                            let src_y = (oy as i32 - rect.y) as usize;
+                            if src_x >= rw || src_y >= rh {
+                                continue;
+                            }
+                            let src_idx = (src_y * rw + src_x) * 3;
+                            if src_idx + 2 >= blur.len() {
+                                continue;
+                            }
+                            let dst_off = (oy * width * 4 + ox * 4) as usize;
+                            if dst_off + 3 < data.len() {
+                                data[dst_off] = blur[src_idx];
+                                data[dst_off + 1] = blur[src_idx + 1];
+                                data[dst_off + 2] = blur[src_idx + 2];
+                                data[dst_off + 3] = 217;
+                            }
+                        }
+                    }
+                } else if let Some(c) = cover.resolved_color {
+                    // Fallback to solid if blur missing
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let off = (y * width * 4 + x * 4) as usize;
+                            if off + 3 < data.len() {
+                                data[off] = c.b;
+                                data[off + 1] = c.g;
+                                data[off + 2] = c.r;
+                                data[off + 3] = 217;
+                            }
+                        }
+                    }
+                }
+            }
+            vision::detection::CoverMode::SolidColor
+            | vision::detection::CoverMode::BackgroundColor => {
+                if let Some(c) = cover.resolved_color {
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let off = (y * width * 4 + x * 4) as usize;
+                            if off + 3 < data.len() {
+                                data[off] = c.b;
+                                data[off + 1] = c.g;
+                                data[off + 2] = c.r;
+                                data[off + 3] = 217;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
     data
+}
+
+/// Legacy wrapper for existing tests that pass a global color.
+pub(crate) fn build_shm_argb_data(
+    covers: &[CoverRect],
+    color: ColorRgb,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    // Adapt legacy covers that have no resolved_color by injecting `color`
+    let patched: Vec<CoverRect> = covers
+        .iter()
+        .map(|c| {
+            if c.resolved_color.is_none() && c.blur_data.is_none() {
+                let mut p = c.clone();
+                p.resolved_color = Some(color);
+                p
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
+    build_shm_argb_data_from_covers(&patched, width, height)
 }
 
 #[cfg(test)]
@@ -1080,10 +1174,7 @@ mod tests {
 
     #[test]
     fn test_shm_solid_cover() {
-        let cover = CoverRect {
-            screen_rect: ScreenRect::new(2, 2, 4, 4),
-            mode: CoverMode::SolidColor,
-        };
+        let cover = CoverRect::new_solid(ScreenRect::new(2, 2, 4, 4), ColorRgb::new(255, 0, 0));
         let data = build_shm_argb_data(&[cover], ColorRgb::new(255, 0, 0), 10, 10);
         // Pixel inside cover (3,3) should be red with alpha 217
         let offset = (3 * 10 * 4 + 3 * 4) as usize;
@@ -1098,14 +1189,8 @@ mod tests {
     #[test]
     fn test_shm_multiple_covers() {
         let covers = vec![
-            CoverRect {
-                screen_rect: ScreenRect::new(0, 0, 2, 2),
-                mode: CoverMode::SolidColor,
-            },
-            CoverRect {
-                screen_rect: ScreenRect::new(5, 5, 2, 2),
-                mode: CoverMode::SolidColor,
-            },
+            CoverRect::new_solid(ScreenRect::new(0, 0, 2, 2), ColorRgb::new(0, 255, 0)),
+            CoverRect::new_solid(ScreenRect::new(5, 5, 2, 2), ColorRgb::new(0, 255, 0)),
         ];
         let data = build_shm_argb_data(&covers, ColorRgb::new(0, 255, 0), 10, 10);
         // First rect pixel (1,1) green
@@ -1131,10 +1216,7 @@ mod tests {
 
     #[test]
     fn test_shm_bounds_clipping() {
-        let cover = CoverRect {
-            screen_rect: ScreenRect::new(8, 8, 10, 10), // extends beyond 10x10
-            mode: CoverMode::SolidColor,
-        };
+        let cover = CoverRect::new_solid(ScreenRect::new(8, 8, 10, 10), ColorRgb::new(0, 0, 255));
         let data = build_shm_argb_data(&[cover], ColorRgb::new(0, 0, 255), 10, 10);
         // Should not panic and should only fill within bounds (8,8)-(10,10)
         assert_eq!(data.len(), 400);
@@ -1146,10 +1228,7 @@ mod tests {
 
     #[test]
     fn test_shm_stride() {
-        let cover = CoverRect {
-            screen_rect: ScreenRect::new(0, 0, 10, 2),
-            mode: CoverMode::SolidColor,
-        };
+        let cover = CoverRect::new_solid(ScreenRect::new(0, 0, 10, 2), ColorRgb::new(255, 0, 0));
         let data = build_shm_argb_data(&[cover], ColorRgb::new(255, 0, 0), 10, 2);
         assert_eq!(data.len(), 10 * 2 * 4);
         // Verify stride = width*4 is used: pixel (0,1) offset = 1*40 + 0
@@ -1162,36 +1241,23 @@ mod tests {
     fn test_channel_empty_and_n_covers() {
         let (tx, rx) = mpsc::channel::<OverlayCommand>();
         // Empty
-        tx.send(OverlayCommand::UpdateCovers(
-            vec![],
-            ColorRgb::new(255, 0, 0),
-        ))
-        .unwrap();
+        tx.send(OverlayCommand::UpdateCovers(vec![])).unwrap();
         let cmd = rx.recv().unwrap();
         match cmd {
-            OverlayCommand::UpdateCovers(covers, _) => assert_eq!(covers.len(), 0),
+            OverlayCommand::UpdateCovers(covers) => assert_eq!(covers.len(), 0),
             _ => panic!("wrong command"),
         }
 
         // N covers
         let covers = vec![
-            CoverRect {
-                screen_rect: ScreenRect::new(0, 0, 10, 10),
-                mode: CoverMode::SolidColor,
-            },
-            CoverRect {
-                screen_rect: ScreenRect::new(20, 20, 10, 10),
-                mode: CoverMode::Blur,
-            },
+            CoverRect::new_solid(ScreenRect::new(0, 0, 10, 10), ColorRgb::new(0, 255, 0)),
+            CoverRect::new_mode_only(ScreenRect::new(20, 20, 10, 10), CoverMode::Blur),
         ];
-        tx.send(OverlayCommand::UpdateCovers(
-            covers.clone(),
-            ColorRgb::new(0, 255, 0),
-        ))
-        .unwrap();
+        tx.send(OverlayCommand::UpdateCovers(covers.clone()))
+            .unwrap();
         let cmd = rx.recv().unwrap();
         match cmd {
-            OverlayCommand::UpdateCovers(c, _) => assert_eq!(c.len(), 2),
+            OverlayCommand::UpdateCovers(c) => assert_eq!(c.len(), 2),
             _ => panic!("wrong command"),
         }
     }
@@ -1199,39 +1265,27 @@ mod tests {
     #[test]
     fn test_channel_latest_state_wins() {
         let (tx, rx) = mpsc::channel::<OverlayCommand>();
-        let a = vec![CoverRect {
-            screen_rect: ScreenRect::new(0, 0, 10, 10),
-            mode: CoverMode::SolidColor,
-        }];
-        let b = vec![CoverRect {
-            screen_rect: ScreenRect::new(20, 20, 10, 10),
-            mode: CoverMode::SolidColor,
-        }];
+        let a = vec![CoverRect::new_solid(
+            ScreenRect::new(0, 0, 10, 10),
+            ColorRgb::new(255, 0, 0),
+        )];
+        let b = vec![CoverRect::new_solid(
+            ScreenRect::new(20, 20, 10, 10),
+            ColorRgb::new(255, 0, 0),
+        )];
         let c = vec![
-            CoverRect {
-                screen_rect: ScreenRect::new(0, 0, 10, 10),
-                mode: CoverMode::SolidColor,
-            },
-            CoverRect {
-                screen_rect: ScreenRect::new(30, 30, 10, 10),
-                mode: CoverMode::SolidColor,
-            },
+            CoverRect::new_solid(ScreenRect::new(0, 0, 10, 10), ColorRgb::new(255, 0, 0)),
+            CoverRect::new_solid(ScreenRect::new(30, 30, 10, 10), ColorRgb::new(255, 0, 0)),
         ];
 
-        tx.send(OverlayCommand::UpdateCovers(a, ColorRgb::new(255, 0, 0)))
-            .unwrap();
-        tx.send(OverlayCommand::UpdateCovers(b, ColorRgb::new(255, 0, 0)))
-            .unwrap();
-        tx.send(OverlayCommand::UpdateCovers(
-            c.clone(),
-            ColorRgb::new(255, 0, 0),
-        ))
-        .unwrap();
+        tx.send(OverlayCommand::UpdateCovers(a)).unwrap();
+        tx.send(OverlayCommand::UpdateCovers(b)).unwrap();
+        tx.send(OverlayCommand::UpdateCovers(c.clone())).unwrap();
 
         // Drain all, only last should be kept as latest
         let mut last: Option<Vec<CoverRect>> = None;
         while let Ok(cmd) = rx.try_recv() {
-            if let OverlayCommand::UpdateCovers(covers, _) = cmd {
+            if let OverlayCommand::UpdateCovers(covers) = cmd {
                 last = Some(covers);
             }
         }
@@ -1287,6 +1341,100 @@ mod tests {
         overlay.update_covers(&covers, &frame).unwrap();
         overlay.clear().unwrap();
     }
+
+    #[test]
+    fn test_shm_blur_cover_renders_blurred_pixels() {
+        // Create a frame with vertical split: left black, right white
+        let mut data = vec![0u8; 10 * 10 * 3];
+        for y in 0..10 {
+            for x in 0..10 {
+                let idx = (y * 10 + x) * 3;
+                if x < 5 {
+                    data[idx] = 0;
+                    data[idx + 1] = 0;
+                    data[idx + 2] = 0;
+                } else {
+                    data[idx] = 255;
+                    data[idx + 1] = 255;
+                    data[idx + 2] = 255;
+                }
+            }
+        }
+        let frame = vision::detection::FrameData::new_bgr(20, 20, vec![128u8; 20 * 20 * 3]);
+        // Manually patch frame region for test: use 10x10 region data
+        let rect = ScreenRect::new(2, 2, 10, 10);
+        let blurred = vision::preprocessing::blur_region(&data, 10, 10);
+        assert_ne!(blurred, data);
+        let cover = CoverRect::new_blur(rect, blurred.clone());
+        let out = build_shm_argb_data_from_covers(&[cover], 20, 20);
+        // Pixel at (5,5) inside blurred rect should be grayish (not pure 0/255) with alpha 217
+        let off = (5 * 20 * 4 + 5 * 4) as usize;
+        assert_eq!(out[off + 3], 217);
+        // Blurred center should be intermediate
+        let b = out[off];
+        assert!(b > 30 && b < 225, "blurred b={}", b);
+        // Outside pixel transparent
+        assert_eq!(out[3], 0);
+        // Ensure frame unused but cover data used
+        let _ = frame;
+    }
+
+    #[test]
+    fn test_shm_dominant_color_render() {
+        // Frame with solid red region
+        let mut data = vec![0u8; 10 * 10 * 3];
+        for i in (0..data.len()).step_by(3) {
+            data[i] = 0; // B
+            data[i + 1] = 0; // G
+            data[i + 2] = 255; // R
+        }
+        let frame = vision::detection::FrameData::new_bgr(10, 10, data);
+        let rect = ScreenRect::new(1, 1, 4, 4);
+        let dom = vision::detection::extract_dominant_color(&frame, &rect).unwrap();
+        assert!(dom.r > 200);
+        let cover = CoverRect::new_dominant(rect, dom);
+        let out = build_shm_argb_data_from_covers(&[cover], 10, 10);
+        let off = (2 * 10 * 4 + 2 * 4) as usize;
+        assert_eq!(out[off + 2], dom.r);
+        assert_eq!(out[off + 3], 217);
+    }
+
+    #[test]
+    fn test_shm_overlapping_covers_last_wins() {
+        let c1 = CoverRect::new_solid(ScreenRect::new(0, 0, 4, 4), ColorRgb::new(255, 0, 0));
+        let c2 = CoverRect::new_solid(ScreenRect::new(2, 2, 4, 4), ColorRgb::new(0, 255, 0));
+        let out = build_shm_argb_data_from_covers(&[c1, c2], 10, 10);
+        // Overlap at (3,3) should be green (last wins)
+        let off = (3 * 10 * 4 + 3 * 4) as usize;
+        assert_eq!(out[off + 1], 255); // G
+        assert_eq!(out[off + 2], 0);
+    }
+
+    #[test]
+    fn test_shm_blur_clipping_negative_coords() {
+        // Rect partially outside (-2,-2) -> clipped
+        let data = vec![100u8; 4 * 4 * 3];
+        let blurred = vision::preprocessing::blur_region(&data, 4, 4);
+        let cover = CoverRect::new_blur(ScreenRect::new(-2, -2, 4, 4), blurred);
+        let out = build_shm_argb_data_from_covers(&[cover], 10, 10);
+        // Should render clipped 2x2 at (0,0)
+        let off = 0_usize;
+        assert_eq!(out[off + 3], 217);
+        // Outside clipped area (5,5) transparent
+        let off2 = (5 * 10 * 4 + 5 * 4) as usize;
+        assert_eq!(out[off2 + 3], 0);
+    }
+
+    #[test]
+    fn test_shm_stale_covers_cleared() {
+        let c = CoverRect::new_solid(ScreenRect::new(0, 0, 2, 2), ColorRgb::new(255, 0, 0));
+        let out1 = build_shm_argb_data_from_covers(&[c], 10, 10);
+        assert_eq!(out1[3], 217);
+        let out2 = build_shm_argb_data_from_covers(&[], 10, 10);
+        for chunk in out2.chunks(4) {
+            assert_eq!(chunk[3], 0);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1306,9 +1454,8 @@ impl OverlayRenderer for WaylandOverlay {
         if !self.capability.is_supported() {
             return Err(OverlayError::Unsupported(format!("{:?}", self.capability)));
         }
-        let color = self.solid_color;
         self.tx
-            .send(OverlayCommand::UpdateCovers(covers.to_vec(), color))
+            .send(OverlayCommand::UpdateCovers(covers.to_vec()))
             .map_err(|e| OverlayError::RenderFailed(e.to_string()))
     }
 

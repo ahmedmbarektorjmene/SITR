@@ -306,13 +306,7 @@ mod tests {
     #[test]
     fn event_channel_blocking_wakes_on_terminated() {
         let (tx, rx) = mpsc::channel::<CoreEvent>();
-        let handle = std::thread::spawn(move || {
-            // Should block until Terminated arrives
-            match rx.recv() {
-                Ok(CoreEvent::Terminated) => true,
-                _ => false,
-            }
-        });
+        let handle = std::thread::spawn(move || matches!(rx.recv(), Ok(CoreEvent::Terminated)));
         std::thread::sleep(Duration::from_millis(20));
         assert!(tx.send(CoreEvent::Terminated).is_ok());
         let woke = join_with_timeout(handle, Duration::from_secs(2));
@@ -322,10 +316,7 @@ mod tests {
     #[test]
     fn cmd_channel_blocking_wakes_on_terminate() {
         let (tx, rx) = mpsc::channel::<UiCommand>();
-        let handle = std::thread::spawn(move || match rx.recv() {
-            Ok(UiCommand::Terminate) => true,
-            _ => false,
-        });
+        let handle = std::thread::spawn(move || matches!(rx.recv(), Ok(UiCommand::Terminate)));
         std::thread::sleep(Duration::from_millis(20));
         assert!(tx.send(UiCommand::Terminate).is_ok());
         let woke = join_with_timeout(handle, Duration::from_secs(2));
@@ -335,10 +326,7 @@ mod tests {
     #[test]
     fn tray_channel_blocking_wakes_on_show() {
         let (tx, rx) = mpsc::channel::<TrayAction>();
-        let handle = std::thread::spawn(move || match rx.recv() {
-            Ok(TrayAction::Show) => true,
-            _ => false,
-        });
+        let handle = std::thread::spawn(move || matches!(rx.recv(), Ok(TrayAction::Show)));
         std::thread::sleep(Duration::from_millis(20));
         assert!(tx.send(TrayAction::Show).is_ok());
         let woke = join_with_timeout(handle, Duration::from_secs(2));
@@ -363,7 +351,7 @@ mod tests {
         // Verify blocking recv wakes on disconnect
         let (tx2, rx2) = mpsc::channel::<UiCommand>();
         let tx2_clone = tx2.clone();
-        let handle2 = std::thread::spawn(move || matches!(rx2.recv(), Err(_)));
+        let handle2 = std::thread::spawn(move || rx2.recv().is_err());
         drop(tx2);
         drop(tx2_clone);
         let woke = join_with_timeout(handle2, Duration::from_secs(1));

@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use crate::app_state::AppState;
 use crate::commands::CoreEvent;
-#[cfg(not(target_os = "linux"))]
-use porda_capture::capturer::{PlatformCapturer, ScreenCapturer};
 use inference::detector::{Detector, MockDetector, OpenCvDetector};
 use overlay::compositor::{CpuOverlayRenderer, OverlayRenderer};
+#[cfg(not(target_os = "linux"))]
+use porda_capture::capturer::{PlatformCapturer, ScreenCapturer};
 use vision::cover::covers_for_detections;
 
 pub struct Pipeline {
@@ -94,10 +94,7 @@ fn run_linux_pipeline(
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .join("porda.onnx");
-        let d = OpenCvDetector::new(
-            onnx_fallback,
-            inference::detector::InferenceDevice::Auto,
-        );
+        let d = OpenCvDetector::new(onnx_fallback, inference::detector::InferenceDevice::Auto);
         Box::new(d)
     } else {
         tracing::info!(
@@ -263,31 +260,45 @@ fn run_linux_pipeline(
                     );
                 }
 
-                let covers = {
+                let (covers, cover_time) = {
                     let s = state.lock().unwrap();
-                    covers_for_detections(
-                        &detections,
-                        &frame,
-                        s.cover_mode(),
-                        s.solid_color(),
-                        &s.window_rects,
-                    )
+                    let mode = s.cover_mode();
+                    let solid = s.solid_color();
+                    let wins = s.window_rects.clone();
+                    drop(s);
+                    let t0 = std::time::Instant::now();
+                    let c = covers_for_detections(&detections, &frame, mode, solid, &wins);
+                    let elapsed = t0.elapsed();
+                    (c, elapsed)
                 };
-
+                let total_pixels: usize = covers
+                    .iter()
+                    .map(|c| (c.screen_rect.width * c.screen_rect.height) as usize)
+                    .sum();
+                let mode = covers
+                    .first()
+                    .map(|c| c.mode)
+                    .unwrap_or(vision::detection::CoverMode::SolidColor);
                 tracing::info!(
-                    "covers_for_detections: input={} -> output={} covers",
+                    "covers_for_detections: input={} -> output={} covers mode={:?} pixels={} time={:?}",
                     detections.len(),
-                    covers.len()
+                    covers.len(),
+                    mode,
+                    total_pixels,
+                    cover_time
                 );
+                // Lightweight debug per-cover timing already logged via tracing::debug in cover generation
                 for (i, cover) in covers.iter().enumerate() {
                     tracing::info!(
-                        "CoverRect[{}]: x={} y={} w={} h={} mode={:?}",
+                        "CoverRect[{}]: x={} y={} w={} h={} mode={:?} resolved={:?} blur={}",
                         i,
                         cover.screen_rect.x,
                         cover.screen_rect.y,
                         cover.screen_rect.width,
                         cover.screen_rect.height,
-                        cover.mode
+                        cover.mode,
+                        cover.resolved_color,
+                        cover.blur_data.is_some()
                     );
                 }
 
@@ -300,9 +311,19 @@ fn run_linux_pipeline(
                 }
 
                 tracing::info!("Overlay: sending UpdateCovers count={}", covers.len());
+                let ot0 = std::time::Instant::now();
                 let overlay_result = overlay.update_covers(&covers, &frame);
+                let ot = ot0.elapsed();
+                tracing::debug!(
+                    "Overlay: update_covers took {:?} covers={}",
+                    ot,
+                    covers.len()
+                );
                 match &overlay_result {
-                    Ok(_) => tracing::info!("Overlay: UpdateCovers sent successfully"),
+                    Ok(_) => tracing::info!(
+                        "Overlay: UpdateCovers sent successfully (overlay_time={:?})",
+                        ot
+                    ),
                     Err(e) => tracing::error!("Overlay: UpdateCovers failed: {}", e),
                 }
                 let _ = overlay_result;

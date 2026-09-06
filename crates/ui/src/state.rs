@@ -98,9 +98,7 @@ impl UiState {
                 is_blur: self.is_blur,
                 is_bg_color: self.is_bg_color,
                 is_solid_color: self.is_solid_color,
-                rgb_color: vision::geometry::ColorRgb::new(
-                    self.rgb_r, self.rgb_g, self.rgb_b,
-                ),
+                rgb_color: vision::geometry::ColorRgb::new(self.rgb_r, self.rgb_g, self.rgb_b),
             },
             hotkeys: config::settings::HotkeyConfig {
                 toggle_key: self.toggle_key.clone(),

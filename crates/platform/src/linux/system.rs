@@ -205,12 +205,7 @@ pub fn list_windows(
     include: &[String],
     exclude: &[String],
     always_skip: &[(String, String)],
-) -> Vec<(
-    WindowHandle,
-    String,
-    String,
-    vision::geometry::ScreenRect,
-)> {
+) -> Vec<(WindowHandle, String, String, vision::geometry::ScreenRect)> {
     super::windows::enumerate_windows()
         .into_iter()
         .filter(|w| !super::windows::should_skip_window(&w.app_id, include, exclude, always_skip))

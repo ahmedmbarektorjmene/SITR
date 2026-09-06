@@ -4,10 +4,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use pipewire as pw;
-use vision::detection::{FrameData, PixelFormat};
 use pw::properties::properties;
 use pw::spa;
 use pw::spa::pod::Pod;
+use vision::detection::{FrameData, PixelFormat};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LinuxCaptureError {

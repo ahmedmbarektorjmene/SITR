@@ -128,18 +128,14 @@ pub fn capture_screenshot() -> Option<vision::detection::FrameData> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn linux_screen_capture() -> Option<(
-    vision::detection::FrameData,
-    vision::geometry::ScreenRect,
-)> {
+pub fn linux_screen_capture() -> Option<(vision::detection::FrameData, vision::geometry::ScreenRect)>
+{
     crate::linux::capture_screen_frame()
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn linux_screen_capture() -> Option<(
-    vision::detection::FrameData,
-    vision::geometry::ScreenRect,
-)> {
+pub fn linux_screen_capture() -> Option<(vision::detection::FrameData, vision::geometry::ScreenRect)>
+{
     None
 }
 
@@ -269,12 +265,7 @@ pub fn list_windows(
     include: &[String],
     exclude: &[String],
     always_skip: &[(String, String)],
-) -> Vec<(
-    WindowHandle,
-    String,
-    String,
-    vision::geometry::ScreenRect,
-)> {
+) -> Vec<(WindowHandle, String, String, vision::geometry::ScreenRect)> {
     #[cfg(target_os = "windows")]
     {
         windows_impl::list_windows(include, exclude, always_skip)
@@ -563,10 +554,8 @@ mod windows_impl {
             }
 
             let value_wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-            let data = std::slice::from_raw_parts(
-                value_wide.as_ptr() as *const u8,
-                value_wide.len() * 2,
-            );
+            let data =
+                std::slice::from_raw_parts(value_wide.as_ptr() as *const u8, value_wide.len() * 2);
             let status = RegSetValueExW(
                 result_key,
                 windows::core::PCWSTR(windows::core::w!("PordaAi").as_ptr()),

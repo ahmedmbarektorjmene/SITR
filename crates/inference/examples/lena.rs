@@ -1,5 +1,5 @@
-use opencv::prelude::*;
 use inference::detector::{Detector, InferenceDevice, OpenCvDetector};
+use opencv::prelude::*;
 use vision::detection::FrameData;
 use vision::geometry::ScreenRect;
 

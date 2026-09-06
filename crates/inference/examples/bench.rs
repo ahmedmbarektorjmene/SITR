@@ -1,7 +1,7 @@
 use inference::detector::{Detector, InferenceDevice, OpenCvDetector};
+use std::time::Instant;
 use vision::detection::FrameData;
 use vision::geometry::ScreenRect;
-use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
     let onnx = std::path::PathBuf::from("model/porda.onnx");
