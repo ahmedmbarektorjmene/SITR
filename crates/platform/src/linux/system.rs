@@ -145,55 +145,6 @@ pub fn set_process_realtime_priority() {
     }
 }
 
-pub fn capture_portal_screenshot() -> Option<vision::detection::FrameData> {
-    // Use GNOME/KDE screenshot portal
-    tracing::info!("Capturing screenshot via portal");
-
-    // Try using spectacle (KDE screenshot tool)
-    if let Ok(output) = std::process::Command::new("spectacle")
-        .args([
-            "--background",
-            "--nonotify",
-            "--output",
-            "/tmp/porda_screenshot.png",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            // Load the screenshot
-            if let Ok(img) = image::open("/tmp/porda_screenshot.png") {
-                let rgb = img.to_rgb8();
-                let (width, height) = rgb.dimensions();
-                return Some(vision::detection::FrameData::new_rgb(
-                    width,
-                    height,
-                    rgb.into_raw(),
-                ));
-            }
-        }
-    }
-
-    // Fallback: use grim for Wayland
-    if let Ok(output) = std::process::Command::new("grim")
-        .args(["-", "/tmp/porda_screenshot.png"])
-        .output()
-    {
-        if output.status.success() {
-            if let Ok(img) = image::open("/tmp/porda_screenshot.png") {
-                let rgb = img.to_rgb8();
-                let (width, height) = rgb.dimensions();
-                return Some(vision::detection::FrameData::new_rgb(
-                    width,
-                    height,
-                    rgb.into_raw(),
-                ));
-            }
-        }
-    }
-
-    None
-}
-
 pub fn get_monitors() -> Vec<vision::geometry::ScreenRect> {
     super::outputs::get_outputs()
         .into_iter()

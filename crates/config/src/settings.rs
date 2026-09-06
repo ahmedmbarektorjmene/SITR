@@ -22,8 +22,6 @@ pub struct DetectionConfig {
     pub is_detect_male: bool,
     pub is_detect_female: bool,
     pub active_timeout_ms: u64,
-    pub sleep_timeout_ms: u64,
-    pub keep_running_seconds: u64,
     pub nms_threshold: f32,
 }
 

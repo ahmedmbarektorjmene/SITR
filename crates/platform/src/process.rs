@@ -112,21 +112,6 @@ pub fn capture_window(_hwnd: WindowHandle) -> Option<vision::detection::FrameDat
     }
 }
 
-pub fn capture_screenshot() -> Option<vision::detection::FrameData> {
-    #[cfg(target_os = "windows")]
-    {
-        windows_impl::capture_screenshot()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        crate::linux::capture_portal_screenshot()
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        None
-    }
-}
-
 #[cfg(target_os = "linux")]
 pub fn linux_screen_capture() -> Option<(vision::detection::FrameData, vision::geometry::ScreenRect)>
 {
@@ -634,10 +619,6 @@ mod windows_impl {
     pub fn set_graphics_preference() {}
 
     pub fn capture_window(_hwnd: WindowHandle) -> Option<vision::detection::FrameData> {
-        None
-    }
-
-    pub fn capture_screenshot() -> Option<vision::detection::FrameData> {
         None
     }
 

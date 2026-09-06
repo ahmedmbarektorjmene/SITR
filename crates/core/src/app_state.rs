@@ -16,6 +16,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: PordaConfig) -> Self {
+        // P1.3: Porda opens deactivated by default. Do not start PipeWire/screen sharing merely because window opened.
         Self {
             config,
             detection_state: DetectionState::Sleep,
@@ -63,20 +64,19 @@ impl AppState {
     }
 
     pub fn detection_interval_ms(&self) -> u64 {
-        match self.detection_state {
-            DetectionState::Active => self.config.detection.active_timeout_ms,
-            DetectionState::Sleep => self.config.detection.sleep_timeout_ms,
-        }
+        // P1.3: no countdown / automatic timeout. Active interval only; sleep/keep_running removed.
+        self.config.detection.active_timeout_ms
     }
 
     pub fn update_detection_state(&mut self, has_detections: bool) {
+        // P1.3: no automatic timeout or auto-deactivation. Remains Active until explicit Deactivate.
+        if !self.is_active {
+            self.detection_state = DetectionState::Sleep;
+            return;
+        }
+        self.detection_state = DetectionState::Active;
         if has_detections {
-            self.detection_state = DetectionState::Active;
             self.last_detection_time = Some(std::time::Instant::now());
-        } else if let Some(last_time) = self.last_detection_time {
-            if last_time.elapsed().as_secs() > self.config.detection.keep_running_seconds {
-                self.detection_state = DetectionState::Sleep;
-            }
         }
     }
 }

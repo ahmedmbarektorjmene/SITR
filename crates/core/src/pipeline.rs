@@ -156,11 +156,8 @@ fn run_linux_pipeline(
         }
     };
 
-    tracing::info!("Linux pipeline: initializing PipeWire portal capture");
-
-    let _ = platform::linux_screen_capture();
-
-    tracing::info!("Linux pipeline: PipeWire capture thread running, entering main loop");
+    tracing::info!("Linux pipeline: PipeWire capture will be initialized lazily on first Activate (no portal dialog while DEACTIVATED)");
+    tracing::info!("Linux pipeline: entering main loop (DEACTIVATED idle, no capture session yet)");
 
     loop {
         if !*running.lock().unwrap() {
@@ -186,11 +183,26 @@ fn run_linux_pipeline(
         };
 
         if !should_detect {
-            let got_frame = platform::linux_screen_capture().is_some();
-            tracing::trace!(
-                "Pipeline: inactive (is_active=false), frame_available={}",
-                got_frame
-            );
+            // P1.3: Do NOT start screen capture while DEACTIVATED.
+            // No Portal request, no PipeWire session, no dialog. Keep tray/UI/hotkeys alive.
+            // Clear any stale covers/overlay when transitioning to inactive.
+            let needs_clear = {
+                let mut s = state.lock().unwrap();
+                if !s.covers.is_empty() || !s.last_detections.is_empty() {
+                    s.covers.clear();
+                    s.last_detections.clear();
+                    s.detection_state = vision::detection::DetectionState::Sleep;
+                    true
+                } else {
+                    false
+                }
+            };
+            if needs_clear {
+                tracing::info!("Pipeline: DEACTIVATED -> clearing stale covers/overlay");
+                let _ = overlay.clear();
+                let _ = event_tx.send(CoreEvent::CoversUpdated(vec![]));
+            }
+            tracing::trace!("Pipeline: inactive (is_active=false), idle without capture");
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
@@ -374,13 +386,34 @@ fn run_windows_pipeline(
             break;
         }
 
-        let interval_ms = {
-            let state = state.lock().unwrap();
-            if !state.should_run_detection() {
-                std::thread::sleep(Duration::from_millis(500));
-                continue;
+        let should_detect = {
+            let s = state.lock().unwrap();
+            s.should_run_detection()
+        };
+        if !should_detect {
+            // P1.3: DEACTIVATED – do not capture, clear stale covers, keep pipeline/tray alive
+            let needs_clear = {
+                let mut s = state.lock().unwrap();
+                if !s.covers.is_empty() || !s.last_detections.is_empty() {
+                    s.covers.clear();
+                    s.last_detections.clear();
+                    s.detection_state = vision::detection::DetectionState::Sleep;
+                    true
+                } else {
+                    false
+                }
+            };
+            if needs_clear {
+                tracing::info!("Windows pipeline: DEACTIVATED -> clearing stale covers");
+                let _ = overlay.clear();
+                let _ = event_tx.send(CoreEvent::CoversUpdated(vec![]));
             }
-            state.detection_interval_ms()
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+        let interval_ms = {
+            let s = state.lock().unwrap();
+            s.detection_interval_ms()
         };
 
         match capturer.capture_foreground(

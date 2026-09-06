@@ -106,6 +106,31 @@ pub fn request_hotkey_configuring(configuring: bool) {
     }
 }
 
+pub fn request_active_update(is_active: bool, detection_state: String) {
+    if let Some(weak) = app_weak_lock().lock().unwrap().clone() {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_is_active(is_active);
+                app.set_detection_state(detection_state.into());
+            }
+        });
+    }
+}
+
+#[allow(dead_code)]
+pub fn request_cover_color_update(r: u8, g: u8, b: u8) {
+    if let Some(weak) = app_weak_lock().lock().unwrap().clone() {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_cover_r(r as i32);
+                app.set_cover_g(g as i32);
+                app.set_cover_b(b as i32);
+                app.set_cover_color(slint::Color::from_rgb_u8(r, g, b));
+            }
+        });
+    }
+}
+
 pub struct PordaApp {
     ui_state: SharedUiState,
     command_tx: std::sync::mpsc::Sender<UiCommand>,
@@ -134,8 +159,6 @@ impl PordaApp {
             app.set_network_width(state.network_width as i32);
             app.set_network_height(state.network_height as i32);
             app.set_active_timeout(state.active_timeout_ms as i32);
-            app.set_sleep_timeout(state.sleep_timeout_ms as i32);
-            app.set_keep_running_seconds(state.keep_running_seconds as i32);
             app.set_is_detect_male(state.is_detect_male);
             app.set_is_detect_female(state.is_detect_female);
             app.set_is_all_windows(state.is_all_windows);
@@ -153,6 +176,14 @@ impl PordaApp {
             app.set_hotkey_available(state.hotkey_available);
             app.set_hotkey_configuring(state.hotkey_configuring);
             app.set_is_linux(cfg!(target_os = "linux"));
+            app.set_cover_r(state.rgb_r as i32);
+            app.set_cover_g(state.rgb_g as i32);
+            app.set_cover_b(state.rgb_b as i32);
+            app.set_cover_color(slint::Color::from_rgb_u8(
+                state.rgb_r,
+                state.rgb_g,
+                state.rgb_b,
+            ));
         }
 
         let weak = app.as_weak();
@@ -194,23 +225,6 @@ impl PordaApp {
             let h = handler.clone();
             let ui_state = Arc::clone(&self.ui_state);
             let weak = weak.clone();
-            app.on_ok_and_close(move || {
-                if let Some(app) = weak.upgrade() {
-                    sync_ui_to_state(&ui_state, &app);
-                    h.save_settings();
-                    tracing::info!("OK -> hiding window (tray remains, app continues)");
-                    let _ = app.hide();
-                } else {
-                    h.save_settings();
-                }
-                // Do NOT quit_event_loop — window hide keeps tray alive
-            });
-        }
-
-        {
-            let h = handler.clone();
-            let ui_state = Arc::clone(&self.ui_state);
-            let weak = weak.clone();
             app.on_apply(move || {
                 if let Some(app) = weak.upgrade() {
                     sync_ui_to_state(&ui_state, &app);
@@ -231,8 +245,6 @@ impl PordaApp {
                     app.set_network_width(state.network_width as i32);
                     app.set_network_height(state.network_height as i32);
                     app.set_active_timeout(state.active_timeout_ms as i32);
-                    app.set_sleep_timeout(state.sleep_timeout_ms as i32);
-                    app.set_keep_running_seconds(state.keep_running_seconds as i32);
                     app.set_is_detect_male(state.is_detect_male);
                     app.set_is_detect_female(state.is_detect_female);
                     app.set_is_blur(state.is_blur);
@@ -246,14 +258,16 @@ impl PordaApp {
                     app.set_hotkey_status(state.hotkey_status.clone().into());
                     app.set_hotkey_available(state.hotkey_available);
                     app.set_hotkey_configuring(state.hotkey_configuring);
+                    app.set_cover_r(state.rgb_r as i32);
+                    app.set_cover_g(state.rgb_g as i32);
+                    app.set_cover_b(state.rgb_b as i32);
+                    app.set_cover_color(slint::Color::from_rgb_u8(
+                        state.rgb_r,
+                        state.rgb_g,
+                        state.rgb_b,
+                    ));
+                    app.set_is_active(state.is_active);
                 }
-            });
-        }
-
-        {
-            let h = handler.clone();
-            app.on_take_screenshot(move || {
-                h.take_screenshot();
             });
         }
 
@@ -367,8 +381,6 @@ fn sync_ui_to_state(state: &SharedUiState, app: &AppWindow) {
     s.network_width = app.get_network_width() as u32;
     s.network_height = app.get_network_height() as u32;
     s.active_timeout_ms = app.get_active_timeout() as u64;
-    s.sleep_timeout_ms = app.get_sleep_timeout() as u64;
-    s.keep_running_seconds = app.get_keep_running_seconds() as u64;
     s.is_detect_male = app.get_is_detect_male();
     s.is_detect_female = app.get_is_detect_female();
     s.is_all_windows = app.get_is_all_windows();
@@ -379,6 +391,10 @@ fn sync_ui_to_state(state: &SharedUiState, app: &AppWindow) {
     s.is_allow_max_cpu_limit = app.get_is_allow_max_cpu_limit();
     s.max_cpu_limit = app.get_max_cpu_limit() as u8;
     s.toggle_key = app.get_toggle_key().to_string();
+    s.rgb_r = app.get_cover_r() as u8;
+    s.rgb_g = app.get_cover_g() as u8;
+    s.rgb_b = app.get_cover_b() as u8;
+    let _ = app.get_cover_color();
 }
 
 #[cfg(test)]

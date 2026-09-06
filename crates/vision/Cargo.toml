@@ -8,3 +8,4 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 image = "0.25"
+fast_image_resize = "6.1.0"

@@ -4,13 +4,15 @@ version.workspace = true
 edition.workspace = true
 
 [build-dependencies]
-slint-build = "1.9"
+slint-build = "1.17.1"
 
 [dependencies]
 porda-core = { workspace = true }
 config = { workspace = true }
 vision = { workspace = true }
-slint = "1.9"
+slint = "1.17.1"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+palette = "0.7"
+image = "0.25"

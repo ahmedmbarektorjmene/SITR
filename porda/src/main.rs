@@ -37,6 +37,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_state = ui::create_shared_state();
     let core_state = Arc::new(Mutex::new(AppState::new(config.clone())));
 
+    // P1.3: Porda opens deactivated by default (even if Python default differs). Do not start PipeWire until Activate.
+    platform::tray::set_tray_is_active(false);
+
     tracing::info!("capture/pipeline initialized");
     let pipeline = Pipeline::new(Arc::clone(&core_state), event_tx.clone());
     pipeline.start();
@@ -143,9 +146,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.cpu_usage = usage;
                     }
                     CoreEvent::CoversUpdated(_covers) => {}
-                    CoreEvent::ScreenshotTaken(path) => {
-                        tracing::info!("Screenshot saved: {:?}", path);
-                    }
                     CoreEvent::Error(msg) => {
                         tracing::error!("Core error: {}", msg);
                     }
@@ -239,28 +239,104 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     UiCommand::RestoreDefaults => {
                         let default_config = config::settings::PordaConfig::default();
-                        let mut state = core_state_for_commands.lock().unwrap();
-                        *state = AppState::new(default_config);
+                        {
+                            let mut state = core_state_for_commands.lock().unwrap();
+                            let prev_active = state.is_active;
+                            *state = AppState::new(default_config.clone());
+                            // P1.3: RestoreDefaults keeps DEACTIVATED by default; do not auto-activate
+                            state.is_active = false;
+                            state.detection_state = vision::detection::DetectionState::Sleep;
+                            let _ = prev_active;
+                        }
+                        {
+                            let mut ui = ui_state_for_commands.lock().unwrap();
+                            *ui = ui::state::UiState::from_config(&default_config);
+                            ui.is_active = false;
+                            ui.detection_state = "Sleep".to_string();
+                        }
+                        platform::tray::set_tray_is_active(false);
+                        ui::request_active_update(false, "Sleep".to_string());
                     }
                     UiCommand::Activate => {
-                        let mut state = core_state_for_commands.lock().unwrap();
-                        state.is_active = true;
+                        {
+                            let mut state = core_state_for_commands.lock().unwrap();
+                            state.is_active = true;
+                            state.detection_state = vision::detection::DetectionState::Active;
+                        }
+                        {
+                            let mut ui = ui_state_for_commands.lock().unwrap();
+                            ui.is_active = true;
+                            ui.detection_state = "Active".to_string();
+                        }
+                        platform::tray::set_tray_is_active(true);
+                        ui::request_active_update(true, "Active".to_string());
                         tracing::info!("Detection activated");
                     }
                     UiCommand::Deactivate => {
-                        let mut state = core_state_for_commands.lock().unwrap();
-                        state.is_active = false;
+                        {
+                            let mut state = core_state_for_commands.lock().unwrap();
+                            state.is_active = false;
+                            state.detection_state = vision::detection::DetectionState::Sleep;
+                            // Clear stale covers on deactivation; pipeline will also clear overlay idly
+                            state.covers.clear();
+                            state.last_detections.clear();
+                        }
+                        {
+                            let mut ui = ui_state_for_commands.lock().unwrap();
+                            ui.is_active = false;
+                            ui.detection_state = "Sleep".to_string();
+                        }
+                        platform::tray::set_tray_is_active(false);
+                        ui::request_active_update(false, "Sleep".to_string());
                         tracing::info!("Detection deactivated");
                     }
                     UiCommand::ToggleActivation => {
-                        let mut state = core_state_for_commands.lock().unwrap();
-                        state.is_active = !state.is_active;
-                        tracing::info!("Detection toggled: {}", state.is_active);
+                        let new_active = {
+                            let mut state = core_state_for_commands.lock().unwrap();
+                            state.is_active = !state.is_active;
+                            if state.is_active {
+                                state.detection_state = vision::detection::DetectionState::Active;
+                            } else {
+                                state.detection_state = vision::detection::DetectionState::Sleep;
+                                state.covers.clear();
+                                state.last_detections.clear();
+                            }
+                            state.is_active
+                        };
+                        {
+                            let mut ui = ui_state_for_commands.lock().unwrap();
+                            ui.is_active = new_active;
+                            ui.detection_state = if new_active { "Active".to_string() } else { "Sleep".to_string() };
+                        }
+                        platform::tray::set_tray_is_active(new_active);
+                        ui::request_active_update(new_active, if new_active { "Active".to_string() } else { "Sleep".to_string() });
+                        tracing::info!("Detection toggled: {}", new_active);
                     }
                     UiCommand::ApplySettings(config) => {
-                        let mut state = core_state_for_commands.lock().unwrap();
-                        *state = AppState::new(config);
-                        tracing::info!("Settings applied");
+                        // P1.3: Preserve activation state across config apply; do not reset to DEACTIVATED
+                        let prev_active = {
+                            let s = core_state_for_commands.lock().unwrap();
+                            (s.is_active, s.detection_state, s.covers.clone(), s.last_detections.clone())
+                        };
+                        let config_to_save = config.clone();
+                        {
+                            let mut state = core_state_for_commands.lock().unwrap();
+                            let is_active = prev_active.0;
+                            let det_state = prev_active.1;
+                            let covers = prev_active.2;
+                            let last = prev_active.3;
+                            *state = AppState::new(config);
+                            state.is_active = is_active;
+                            state.detection_state = det_state;
+                            state.covers = covers;
+                            state.last_detections = last;
+                        }
+                        // P1.3 fix: Apply must persist so restart retains cover color etc. (previously only in-mem, Apply appeared to not save)
+                        if let Err(e) = config::defaults::save_config(&config_to_save) {
+                            tracing::error!("Failed to save config on Apply: {}", e);
+                        }
+                        let _ = event_tx_for_commands.send(CoreEvent::ConfigSaved);
+                        tracing::info!("Settings applied (activation preserved: {})", prev_active.0);
                     }
                     UiCommand::Terminate => {
                         tracing::info!("Terminate requested");
@@ -268,17 +344,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui::request_quit();
                         break;
                     }
-                    UiCommand::TakeScreenshot => match platform::capture_screenshot() {
-                        Some(_frame) => {
-                            let dataset_dir = config::defaults::dataset_dir();
-                            let filename = format!("screenshot_{}.jpg", chrono_now());
-                            let path = dataset_dir.join(filename);
-                            tracing::info!("Screenshot captured: {:?}", path);
-                        }
-                        None => {
-                            tracing::warn!("Failed to capture screenshot");
-                        }
-                    },
                     UiCommand::RefreshHotkeys => {
                         #[cfg(target_os = "linux")]
                         {
@@ -419,9 +484,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tracing::info!("Tray -> ToggleDetection requested");
                         let _ = cmd_tx_for_tray.send(UiCommand::ToggleActivation);
                     }
-                    TrayAction::TakeScreenshot => {
-                        let _ = cmd_tx_for_tray.send(UiCommand::TakeScreenshot);
-                    }
                     TrayAction::RefreshHotkeys => {
                         let _ = cmd_tx_for_tray.send(UiCommand::RefreshHotkeys);
                     }
@@ -475,14 +537,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Porda AI stopped – all subsystems terminated cleanly");
     Ok(())
-}
-
-fn chrono_now() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string()
 }
 
 #[cfg(test)]
@@ -570,16 +624,23 @@ mod tests {
 
     #[test]
     fn tray_exit_is_only_termination_action() {
-        // Verify TrayAction::Exit is distinct and Show is the only UI opener
+        // Verify TrayAction::Exit is distinct and Show is the only UI opener. Activation is single toggle.
         assert_ne!(TrayAction::Show, TrayAction::Exit);
         let menu = TrayAction::menu_actions();
-        assert_eq!(menu.len(), 5);
+        assert_eq!(menu.len(), 3);
         assert!(menu.contains(&TrayAction::Show));
         assert!(menu.contains(&TrayAction::Exit));
+        assert!(menu.contains(&TrayAction::ToggleDetection));
         assert_eq!(menu.iter().filter(|a| **a == TrayAction::Show).count(), 1);
         // Ensure no OpenSettings exists
         for a in &menu {
             assert_ne!(format!("{:?}", a), "OpenSettings");
         }
+        // Dynamic label
+        platform::tray::set_tray_is_active(false);
+        assert_eq!(platform::tray::current_toggle_label(), "Activate");
+        platform::tray::set_tray_is_active(true);
+        assert_eq!(platform::tray::current_toggle_label(), "Deactivate");
+        platform::tray::set_tray_is_active(false);
     }
 }

@@ -50,10 +50,14 @@ impl ksni::Tray for PordaTrayInner {
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
         let tx_show = self.action_tx.clone();
-        let tx_activate = self.action_tx.clone();
-        let tx_deactivate = self.action_tx.clone();
-        let tx_screenshot = self.action_tx.clone();
+        let tx_toggle = self.action_tx.clone();
         let tx_exit = self.action_tx.clone();
+
+        // P1.3: single activation entry reflecting actual runtime state (inactive → Activate, active → Deactivate)
+        // Reads shared atomic updated by core via platform::tray::set_tray_is_active
+        let is_active = platform::tray::get_tray_is_active();
+        let toggle_label = platform::tray::toggle_label(is_active).to_string();
+        let toggle_action = TrayAction::ToggleDetection;
 
         vec![
             StandardItem {
@@ -66,28 +70,10 @@ impl ksni::Tray for PordaTrayInner {
             }
             .into(),
             StandardItem {
-                label: TrayAction::Activate.label().into(),
+                label: toggle_label.clone(),
                 activate: Box::new(move |_| {
-                    tracing::info!("tray menu -> Activate");
-                    let _ = tx_activate.send(TrayAction::Activate);
-                }),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: TrayAction::Deactivate.label().into(),
-                activate: Box::new(move |_| {
-                    tracing::info!("tray menu -> Deactivate");
-                    let _ = tx_deactivate.send(TrayAction::Deactivate);
-                }),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: TrayAction::TakeScreenshot.label().into(),
-                activate: Box::new(move |_| {
-                    tracing::info!("tray menu -> TakeScreenshot");
-                    let _ = tx_screenshot.send(TrayAction::TakeScreenshot);
+                    tracing::info!("tray menu -> ToggleDetection ({})", toggle_label);
+                    let _ = tx_toggle.send(toggle_action.clone());
                 }),
                 ..Default::default()
             }
@@ -163,8 +149,9 @@ impl PordaTray {
         }
         tracing::info!("tray icon created: {}x{} ARGB {} bytes", w, h, data.len());
 
-        // Menu is created lazily by ksni via Tray::menu(), but we trace that it is defined
-        tracing::info!("tray menu created: Show / Activate / Deactivate / Take Screenshot / Exit");
+        // Menu is created lazily by ksni via Tray::menu(), dynamic toggle label reflects runtime is_active
+        let cur_label = platform::tray::current_toggle_label();
+        tracing::info!("tray menu created: Show / {} / Exit (dynamic)", cur_label);
 
         // Diagnose desktop environment tray host
         diagnose_tray_host();
@@ -292,7 +279,6 @@ pub fn tray_action_to_ui_command(action: &TrayAction) -> Option<porda_core::comm
         TrayAction::Activate => Some(UiCommand::Activate),
         TrayAction::Deactivate => Some(UiCommand::Deactivate),
         TrayAction::ToggleDetection => Some(UiCommand::ToggleActivation),
-        TrayAction::TakeScreenshot => Some(UiCommand::TakeScreenshot),
         TrayAction::RefreshHotkeys => Some(UiCommand::RefreshHotkeys),
         TrayAction::RefreshOverlay => Some(UiCommand::RefreshOverlay),
         // Show is UI concern handled separately in main.rs via window show
@@ -341,10 +327,6 @@ mod tests {
         assert!(matches!(
             tray_action_to_ui_command(&TrayAction::ToggleDetection),
             Some(UiCommand::ToggleActivation)
-        ));
-        assert!(matches!(
-            tray_action_to_ui_command(&TrayAction::TakeScreenshot),
-            Some(UiCommand::TakeScreenshot)
         ));
         assert!(tray_action_to_ui_command(&TrayAction::Show).is_none());
         assert!(tray_action_to_ui_command(&TrayAction::Exit).is_none());
@@ -404,7 +386,7 @@ mod tests {
 
     #[test]
     fn lifecycle_show_is_only_ui_opener() {
-        // Show is the single tray action for displaying main UI.
+        // Show is the single tray action for displaying main UI. Activation is single toggle.
         let actions = TrayAction::menu_actions();
         assert!(actions.contains(&TrayAction::Show));
         assert_eq!(
@@ -412,17 +394,21 @@ mod tests {
             1
         );
         // No OpenSettings / Settings variant exists
-        assert_eq!(actions.len(), 5);
+        assert_eq!(actions.len(), 3);
         assert_eq!(
             actions,
             vec![
                 TrayAction::Show,
-                TrayAction::Activate,
-                TrayAction::Deactivate,
-                TrayAction::TakeScreenshot,
+                TrayAction::ToggleDetection,
                 TrayAction::Exit
             ]
         );
+        // Dynamic label reflects runtime
+        platform::tray::set_tray_is_active(false);
+        assert_eq!(platform::tray::current_toggle_label(), "Activate");
+        platform::tray::set_tray_is_active(true);
+        assert_eq!(platform::tray::current_toggle_label(), "Deactivate");
+        platform::tray::set_tray_is_active(false);
     }
 
     #[test]

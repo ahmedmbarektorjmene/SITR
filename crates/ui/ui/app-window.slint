@@ -21,8 +21,10 @@ component SettingsSidebar inherits VerticalLayout {
 
 export component AppWindow inherits Window {
     title: "Porda AI Settings";
-    preferred-width: 820px;
-    preferred-height: 540px;
+    min-width: 820px;
+    min-height: 540px;
+    preferred-width: root.is-solid-color ? 1000px : 820px;
+    preferred-height: root.is-solid-color ? 800px : 540px;
 
     in property <bool> is-active: false;
     in-out property <bool> is-blur: true;
@@ -32,8 +34,6 @@ export component AppWindow inherits Window {
     in-out property <int> network-width: 544;
     in-out property <int> network-height: 320;
     in-out property <int> active-timeout: 65;
-    in-out property <int> sleep-timeout: 500;
-    in-out property <int> keep-running-seconds: 10;
     in-out property <string> engine: "CPU Engine";
     in-out property <bool> is-detect-male: false;
     in-out property <bool> is-detect-female: true;
@@ -55,15 +55,19 @@ export component AppWindow inherits Window {
     in property <float> cpu-usage: 0.0;
     in property <string> detection-state: "Sleep";
     in-out property <int> current-page: 0;
+    in-out property <int> cover-r: 0;
+    in-out property <int> cover-g: 0;
+    in-out property <int> cover-b: 255;
+    in-out property <color> cover-color: #0000ff;
+    in-out property <length> wheel-dot-x: 80px;
+    in-out property <length> wheel-dot-y: 80px;
 
     callback activate();
     callback deactivate();
     callback toggle-activation();
     callback save();
-    callback ok_and_close();
     callback apply();
     callback restore-defaults();
-    callback take-screenshot();
     callback refresh-hotkeys();
     callback configure-hotkey();
     callback terminate();
@@ -106,6 +110,7 @@ export component AppWindow inherits Window {
 
         // --- RIGHT MAIN CONTENT PANEL ---
         VerticalLayout {
+            horizontal-stretch: 1;
             spacing: 8px;
 
             // Content Area
@@ -119,29 +124,33 @@ export component AppWindow inherits Window {
                     alignment: start; // Prevents vertical stretching of inner pages
 
                     if root.current-page == 0: BasicPage {
-                        is-blur: root.is-blur;
-                        is-bg-color: root.is-bg-color;
-                        is-solid-color: root.is-solid-color;
-                        accuracy: root.accuracy;
-                        is-detect-male: root.is-detect-male;
-                        is-detect-female: root.is-detect-female;
+                        is-blur <=> root.is-blur;
+                        is-bg-color <=> root.is-bg-color;
+                        is-solid-color <=> root.is-solid-color;
+                        accuracy <=> root.accuracy;
+                        is-detect-male <=> root.is-detect-male;
+                        is-detect-female <=> root.is-detect-female;
+                        cover-r <=> root.cover-r;
+                        cover-g <=> root.cover-g;
+                        cover-b <=> root.cover-b;
+                        cover-color <=> root.cover-color;
+                        wheel-dot-x <=> root.wheel-dot-x;
+                        wheel-dot-y <=> root.wheel-dot-y;
                     }
 
                     if root.current-page == 1: NetworkSizePage {
-                        network-width: root.network-width;
-                        network-height: root.network-height;
+                        network-width <=> root.network-width;
+                        network-height <=> root.network-height;
                     }
 
                     if root.current-page == 2: TimeoutPage {
-                        active-timeout: root.active-timeout;
-                        sleep-timeout: root.sleep-timeout;
-                        keep-running-seconds: root.keep-running-seconds;
+                        active-timeout <=> root.active-timeout;
                     }
 
                     if root.current-page == 3: AdditionalOptionsPage {
-                        auto-startup: root.auto-startup;
-                        is-priority-realtime: root.is-priority-realtime;
-                        toggle-key: root.toggle-key;
+                        auto-startup <=> root.auto-startup;
+                        is-priority-realtime <=> root.is-priority-realtime;
+                        toggle-key <=> root.toggle-key;
                         hotkey-display: root.hotkey-display;
                         hotkey-status: root.hotkey-status;
                         hotkey-available: root.hotkey-available;
@@ -152,17 +161,17 @@ export component AppWindow inherits Window {
                     }
 
                     if root.current-page == 4: InExAppPage {
-                        is-all-windows: root.is-all-windows;
-                        is-include-window: root.is-include-window;
-                        is-exclude-window: root.is-exclude-window;
-                        include-windows: root.include-windows;
-                        exclude-windows: root.exclude-windows;
+                        is-all-windows <=> root.is-all-windows;
+                        is-include-window <=> root.is-include-window;
+                        is-exclude-window <=> root.is-exclude-window;
+                        include-windows <=> root.include-windows;
+                        exclude-windows <=> root.exclude-windows;
                     }
 
 
                     if root.current-page == 6: ScalingPage {
-                        is-allow-max-cpu-limit: root.is-allow-max-cpu-limit;
-                        max-cpu-limit: root.max-cpu-limit;
+                        is-allow-max-cpu-limit <=> root.is-allow-max-cpu-limit;
+                        max-cpu-limit <=> root.max-cpu-limit;
                     }
 
                     if root.current-page == 7: AboutPage {}
@@ -186,21 +195,12 @@ export component AppWindow inherits Window {
                         clicked => { root.toggle-activation(); }
                     }
                     Button {
-                        text: "Screenshot";
-                        clicked => { root.take-screenshot(); }
-                    }
-                    Button {
                         text: "Default";
                         clicked => { root.restore-defaults(); }
                     }
                     Button {
                         text: "Apply";
                         clicked => { root.apply(); }
-                    }
-                    Button {
-                        text: "OK";
-                        primary: true;
-                        clicked => { root.ok_and_close(); }
                     }
                 }
             }

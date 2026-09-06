@@ -20,8 +20,6 @@ pub trait ScreenCapturer: Send + Sync {
         exclude: &[String],
         always_skip: &[(String, String)],
     ) -> Result<CapturedFrame, CaptureError>;
-
-    fn capture_full_screen(&self) -> Result<FrameData, CaptureError>;
 }
 
 pub struct CapturedFrame {
@@ -91,11 +89,6 @@ impl ScreenCapturer for PlatformCapturer {
             process_name,
             window_title,
         })
-    }
-
-    fn capture_full_screen(&self) -> Result<FrameData, CaptureError> {
-        platform::capture_screenshot()
-            .ok_or_else(|| CaptureError::Failed("Failed to capture screenshot".to_string()))
     }
 }
 

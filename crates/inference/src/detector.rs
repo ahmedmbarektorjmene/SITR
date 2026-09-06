@@ -453,61 +453,43 @@ impl Detector for OpenCvDetector {
 #[cfg(feature = "opencv")]
 fn mat_to_vec(mat: &opencv::core::Mat) -> Result<(Vec<f32>, u32, u32), InferenceError> {
     use opencv::prelude::MatTraitConstManual;
+
     let dims = mat.dims();
-    if dims == 4 {
-        let ms = mat.mat_size();
-        let n = ms
-            .get(0)
-            .map_err(|e| InferenceError::Failed(format!("mat_size 0 {}", e)))?;
-        let c = ms
-            .get(1)
-            .map_err(|e| InferenceError::Failed(format!("mat_size 1 {}", e)))?;
-        let h = ms
-            .get(2)
-            .map_err(|e| InferenceError::Failed(format!("mat_size 2 {}", e)))?;
-        let w = ms
-            .get(3)
-            .map_err(|e| InferenceError::Failed(format!("mat_size 3 {}", e)))?;
-        if n != 1 || c != 21 {
-            return Err(InferenceError::Failed(format!(
-                "unexpected ONNX output shape dims {} n={} c={} h={} w={}",
-                dims, n, c, h, w
-            )));
-        }
-        let total = (c * h * w) as usize;
-        let slice = mat
-            .data_typed::<f32>()
-            .map_err(|e| InferenceError::Failed(format!("data_typed failed: {}", e)))?;
-        if slice.len() < total {
-            return Err(InferenceError::Failed(format!(
-                "slice len {} < total {}",
-                slice.len(),
-                total
-            )));
-        }
-        Ok((slice[..total].to_vec(), h as u32, w as u32))
-    } else if dims == 3 {
-        let ms = mat.mat_size();
-        let c = ms
-            .get(0)
-            .map_err(|e| InferenceError::Failed(format!("mat_size 0 {}", e)))?;
-        let h = ms
-            .get(1)
-            .map_err(|e| InferenceError::Failed(format!("mat_size 1 {}", e)))?;
-        let w = ms
-            .get(2)
-            .map_err(|e| InferenceError::Failed(format!("mat_size 2 {}", e)))?;
-        let total = (c * h * w) as usize;
-        let slice = mat
-            .data_typed::<f32>()
-            .map_err(|e| InferenceError::Failed(format!("data_typed 3d failed: {}", e)))?;
-        Ok((slice[..total].to_vec(), h as u32, w as u32))
-    } else {
-        Err(InferenceError::Failed(format!(
-            "unsupported mat dims {}",
-            dims
-        )))
+    if dims != 4 && dims != 3 {
+        return Err(InferenceError::Failed(format!("unsupported mat dims {dims}")));
     }
+
+    let ms = mat.mat_size();
+
+    // Map opencv::Error to InferenceError explicitly on each get call
+    let (c, h, w) = if dims == 4 {
+        (
+            ms.get(1).map_err(|e| InferenceError::Failed(e.to_string()))?,
+            ms.get(2).map_err(|e| InferenceError::Failed(e.to_string()))?,
+            ms.get(3).map_err(|e| InferenceError::Failed(e.to_string()))?,
+        )
+    } else {
+        (
+            ms.get(0).map_err(|e| InferenceError::Failed(e.to_string()))?,
+            ms.get(1).map_err(|e| InferenceError::Failed(e.to_string()))?,
+            ms.get(2).map_err(|e| InferenceError::Failed(e.to_string()))?,
+        )
+    };
+
+    let total = (c * h * w) as usize;
+    let slice = mat
+        .data_typed::<f32>()
+        .map_err(|e| InferenceError::Failed(format!("data_typed failed: {e}")))?;
+
+    if slice.len() < total {
+        return Err(InferenceError::Failed(format!(
+            "buffer underflow: slice len {} < total {}",
+            slice.len(),
+            total
+        )));
+    }
+
+    Ok((slice[..total].to_vec(), h as u32, w as u32))
 }
 
 #[cfg(not(feature = "opencv"))]

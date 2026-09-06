@@ -40,37 +40,18 @@ impl UiCommandHandler {
     }
 
     pub fn activate(&self) {
-        {
-            let mut state = self.state.lock().unwrap();
-            state.is_active = true;
-            state.detection_state = "Active".to_string();
-        }
+        // P1.3: Do NOT mutate UI state here – runtime (porda-core) is source of truth.
+        // Send typed command through existing architecture; UI will be updated via request_active_update.
         let _ = self.command_tx.send(UiCommand::Activate);
     }
 
     pub fn deactivate(&self) {
-        {
-            let mut state = self.state.lock().unwrap();
-            state.is_active = false;
-            state.detection_state = "Sleep".to_string();
-        }
         let _ = self.command_tx.send(UiCommand::Deactivate);
     }
 
     pub fn toggle_activation(&self) {
-        let is_active = {
-            let state = self.state.lock().unwrap();
-            state.is_active
-        };
-        if is_active {
-            self.deactivate();
-        } else {
-            self.activate();
-        }
-    }
-
-    pub fn take_screenshot(&self) {
-        let _ = self.command_tx.send(UiCommand::TakeScreenshot);
+        // Single toggle path – core decides new state, UI derives from runtime feedback.
+        let _ = self.command_tx.send(UiCommand::ToggleActivation);
     }
 
     pub fn refresh_hotkeys(&self) {

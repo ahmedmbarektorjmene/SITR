@@ -26,8 +26,6 @@ impl Default for DetectionConfig {
             is_detect_male: false,
             is_detect_female: true,
             active_timeout_ms: 65,
-            sleep_timeout_ms: 500,
-            keep_running_seconds: 10,
             nms_threshold: 0.1,
         }
     }
@@ -134,10 +132,6 @@ pub fn app_data_dir() -> std::path::PathBuf {
     }
 }
 
-pub fn dataset_dir() -> std::path::PathBuf {
-    app_data_dir().join("Dataset")
-}
-
 pub fn external_model_dir() -> std::path::PathBuf {
     app_data_dir().join("Extarnal-Model")
 }
@@ -165,7 +159,7 @@ pub fn save_config(config: &PordaConfig) -> Result<(), std::io::Error> {
 }
 
 pub fn ensure_directories() -> std::io::Result<()> {
-    let dirs = [app_data_dir(), dataset_dir(), external_model_dir()];
+    let dirs = [app_data_dir(), external_model_dir()];
     for dir in &dirs {
         std::fs::create_dir_all(dir)?;
     }

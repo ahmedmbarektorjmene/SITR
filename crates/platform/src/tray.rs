@@ -1,4 +1,29 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+
+static TRAY_IS_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Update tray activation state for dynamic menu label (inactive → Activate, active → Deactivate).
+pub fn set_tray_is_active(active: bool) {
+    TRAY_IS_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+pub fn get_tray_is_active() -> bool {
+    TRAY_IS_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Human-readable label for the dynamic toggle action.
+pub fn toggle_label(is_active: bool) -> &'static str {
+    if is_active {
+        "Deactivate"
+    } else {
+        "Activate"
+    }
+}
+
+pub fn current_toggle_label() -> &'static str {
+    toggle_label(get_tray_is_active())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayAction {
@@ -8,9 +33,8 @@ pub enum TrayAction {
     Activate,
     /// Deactivate detection pipeline
     Deactivate,
-    /// Toggle detection (activate <-> deactivate)
+    /// Toggle detection (activate <-> deactivate) – single source of truth for tray activation
     ToggleDetection,
-    TakeScreenshot,
     RefreshHotkeys,
     RefreshOverlay,
     Exit,
@@ -24,22 +48,25 @@ impl TrayAction {
             TrayAction::Activate => "Activate",
             TrayAction::Deactivate => "Deactivate",
             TrayAction::ToggleDetection => "Toggle Detection",
-            TrayAction::TakeScreenshot => "Take Screenshot",
             TrayAction::RefreshHotkeys => "Refresh Hotkeys",
             TrayAction::RefreshOverlay => "Refresh Overlay",
             TrayAction::Exit => "Exit",
         }
     }
 
-    /// All actions that should appear in the tray menu, in display order
+    /// All actions that should appear in the tray menu, in display order – single toggle entry reflects runtime state.
     pub fn menu_actions() -> Vec<TrayAction> {
+        // P1.3: tray shows single activation toggle (reflects actual runtime), not duplicate Activate/Deactivate.
         vec![
             TrayAction::Show,
-            TrayAction::Activate,
-            TrayAction::Deactivate,
-            TrayAction::TakeScreenshot,
+            TrayAction::ToggleDetection,
             TrayAction::Exit,
         ]
+    }
+
+    /// Current activation label for tray (used by systray to render dynamic menu).
+    pub fn current_toggle_label() -> &'static str {
+        toggle_label(get_tray_is_active())
     }
 }
 
@@ -153,16 +180,14 @@ mod tests {
     }
 
     #[test]
-    fn tray_menu_is_exactly_five_without_settings() {
+    fn tray_menu_is_exactly_three_without_settings() {
         let actions = TrayAction::menu_actions();
-        assert_eq!(actions.len(), 5);
+        assert_eq!(actions.len(), 3);
         assert_eq!(
             actions,
             vec![
                 TrayAction::Show,
-                TrayAction::Activate,
-                TrayAction::Deactivate,
-                TrayAction::TakeScreenshot,
+                TrayAction::ToggleDetection,
                 TrayAction::Exit
             ]
         );
@@ -172,6 +197,12 @@ mod tests {
         assert!(!actions
             .iter()
             .any(|a| format!("{:?}", a).contains("OpenSettings")));
+        // Dynamic toggle label reflects runtime state, not duplicate Activate/Deactivate
+        set_tray_is_active(false);
+        assert_eq!(current_toggle_label(), "Activate");
+        set_tray_is_active(true);
+        assert_eq!(current_toggle_label(), "Deactivate");
+        set_tray_is_active(false);
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use crate::geometry::ScreenRect;
-use image::{imageops::FilterType, ImageBuffer, Rgb};
 
+
+use fast_image_resize::images::{Image, ImageRef};
+use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 /// Mirrors Python `MainWindow.add_padding` in `Porda-AI/Porda-AI/main.py:782-801`.
 ///
 /// Returns `(padded_data, x_ratio, y_ratio)` where `x_ratio = src_width/new_w`
@@ -17,12 +19,10 @@ pub fn resize_and_pad(
         return (vec![], 1.0, 1.0);
     }
 
-    let scale =
-        (target_height as f32 / src_height as f32).min(target_width as f32 / src_width as f32);
+    let scale = (target_height as f32 / src_height as f32).min(target_width as f32 / src_width as f32);
     let new_w = (src_width as f32 * scale) as u32;
     let new_h = (src_height as f32 * scale) as u32;
 
-    // Avoid division by zero if scale is 0
     if new_w == 0 || new_h == 0 {
         return (
             vec![0u8; (target_width * target_height * 3) as usize],
@@ -34,22 +34,34 @@ pub fn resize_and_pad(
     let bottom = target_height - new_h;
     let right = target_width - new_w;
 
-    // Python early-return optimization: avoid manual resize when already close
-    // if (bottom <55 and right==0) or (right <70 and bottom==0): return frame,1,1
     if (bottom < 55 && right == 0) || (right < 70 && bottom == 0) {
         return (data.to_vec(), 1.0, 1.0);
     }
 
-    // Resize with bilinear (INTER_LINEAR equivalent)
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::from_raw(src_width, src_height, data.to_vec())
-            .unwrap_or_else(|| ImageBuffer::new(src_width, src_height));
+    // 1. Borrow source slice without allocation using ImageRef::new
+    let src_image = ImageRef::new(
+        src_width,
+        src_height,
+        data,
+        PixelType::U8x3,
+    )
+    .expect("Failed to create src image view");
 
-    let resized = image::imageops::resize(&img, new_w, new_h, FilterType::Triangle);
-    let resized_data = resized.into_raw();
+    // 2. Prepare destination image
+    let mut dst_image = Image::new(new_w, new_h, PixelType::U8x3);
 
-    // Pad with black (0,0,0) on bottom and right only, matching
-    // cv2.copyMakeBorder(resized, 0, bottom, 0, right, BORDER_CONSTANT, value=[0,0,0])
+    // 3. Configure and execute resizer
+    let mut resizer = Resizer::new();
+    let mut options = ResizeOptions::default();
+    options.algorithm = ResizeAlg::Convolution(FilterType::Bilinear);
+
+    resizer
+        .resize(&src_image, &mut dst_image, &options)
+        .expect("Resize failed");
+
+    let resized_data = dst_image.into_vec();
+
+    // 4. Zero-padded canvas matching OpenCV copyMakeBorder layout
     let mut padded = vec![0u8; (target_width * target_height * 3) as usize];
     for y in 0..new_h {
         let src_start = (y * new_w * 3) as usize;
@@ -63,6 +75,7 @@ pub fn resize_and_pad(
 
     let x_ratio = src_width as f32 / new_w as f32;
     let y_ratio = src_height as f32 / new_h as f32;
+
     (padded, x_ratio, y_ratio)
 }
 

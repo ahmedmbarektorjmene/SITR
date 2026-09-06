@@ -1,4 +1,5 @@
-import { Button, CheckBox, SpinBox, LineEdit, TextEdit, GroupBox, Palette } from "std-widgets.slint";
+import { Button, CheckBox, RadioGroup, RadioButton, SpinBox, LineEdit, TextEdit, GroupBox, Palette } from "std-widgets.slint";
+
 
 export component SidebarButton inherits Rectangle {
     in property <string> label;
@@ -35,29 +36,240 @@ export component BasicPage inherits VerticalLayout {
     in-out property <int> accuracy: 25;
     in-out property <bool> is-detect-male: false;
     in-out property <bool> is-detect-female: true;
+    in-out property <int> cover-r: 0;
+    in-out property <int> cover-g: 0;
+    in-out property <int> cover-b: 255;
+    in-out property <color> cover-color: #0000ff;
+    in-out property <length> wheel-dot-x: 80px;
+    in-out property <length> wheel-dot-y: 80px;
 
     spacing: 12px; // Tightened vertical layout gaps
     alignment: start; // Prevents page elements from stretching vertically
 
     GroupBox {
         title: "Cover Mode";
-        HorizontalLayout {
-            spacing: 16px;
-            alignment: start;
-            CheckBox {
+        RadioGroup {
+            orientation: horizontal;
+            RadioButton {
                 text: "Blur";
                 checked: root.is-blur;
-                toggled => { root.is-blur = self.checked; root.is-bg-color = false; root.is-solid-color = false; }
+                toggled => { root.is-blur = true; root.is-bg-color = false; root.is-solid-color = false; }
             }
-            CheckBox {
+            RadioButton {
                 text: "Background Color";
                 checked: root.is-bg-color;
-                toggled => { root.is-bg-color = self.checked; root.is-blur = false; root.is-solid-color = false; }
+                toggled => { root.is-bg-color = true; root.is-blur = false; root.is-solid-color = false; }
             }
-            CheckBox {
+            RadioButton {
                 text: "Solid Color";
                 checked: root.is-solid-color;
-                toggled => { root.is-solid-color = self.checked; root.is-blur = false; root.is-bg-color = false; }
+                toggled => { root.is-solid-color = true; root.is-blur = false; root.is-bg-color = false; }
+            }
+        }
+    }
+
+    if root.is-solid-color: GroupBox {
+        title: "Solid Color";
+        VerticalLayout {
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    background: root.cover-color;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                }
+                Text { text: "Preview"; vertical-alignment: center; font-size: 13px; }
+                Text {
+                    text: "(" + root.cover-r + ", " + root.cover-g + ", " + root.cover-b + ")";
+                    vertical-alignment: center;
+                    font-size: 11px;
+                    color: Palette.foreground.transparentize(30%);
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: start;
+                Text { text: "R:"; vertical-alignment: center; font-size: 13px; width: 16px; }
+                SpinBox {
+                    width: 80px;
+                    value: root.cover-r;
+                    minimum: 0;
+                    maximum: 255;
+                    edited => { root.cover-r = self.value; root.cover-color = rgb(root.cover-r, root.cover-g, root.cover-b); }
+                }
+                Text { text: "G:"; vertical-alignment: center; font-size: 13px; width: 16px; }
+                SpinBox {
+                    width: 80px;
+                    value: root.cover-g;
+                    minimum: 0;
+                    maximum: 255;
+                    edited => { root.cover-g = self.value; root.cover-color = rgb(root.cover-r, root.cover-g, root.cover-b); }
+                }
+                Text { text: "B:"; vertical-alignment: center; font-size: 13px; width: 16px; }
+                SpinBox {
+                    width: 80px;
+                    value: root.cover-b;
+                    minimum: 0;
+                    maximum: 255;
+                    edited => { root.cover-b = self.value; root.cover-color = rgb(root.cover-r, root.cover-g, root.cover-b); }
+                }
+            }
+            // Color wheel – hue strip + preset colors
+            VerticalLayout {
+                spacing: 6px;
+                Text { text: "Color Wheel / Presets"; font-size: 11px; color: Palette.foreground.transparentize(40%); }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+                    // Preset colors
+                    Rectangle { width: 28px; height: 28px; background: #ff0000; border-radius: 4px; TouchArea { clicked => { root.cover-r = 255; root.cover-g = 0; root.cover-b = 0; root.cover-color = #ff0000; } } }
+                    Rectangle { width: 28px; height: 28px; background: #00ff00; border-radius: 4px; TouchArea { clicked => { root.cover-r = 0; root.cover-g = 255; root.cover-b = 0; root.cover-color = #00ff00; } } }
+                    Rectangle { width: 28px; height: 28px; background: #0000ff; border-radius: 4px; TouchArea { clicked => { root.cover-r = 0; root.cover-g = 0; root.cover-b = 255; root.cover-color = #0000ff; } } }
+                    Rectangle { width: 28px; height: 28px; background: #ffff00; border-radius: 4px; TouchArea { clicked => { root.cover-r = 255; root.cover-g = 255; root.cover-b = 0; root.cover-color = #ffff00; } } }
+                    Rectangle { width: 28px; height: 28px; background: #ff00ff; border-radius: 4px; TouchArea { clicked => { root.cover-r = 255; root.cover-g = 0; root.cover-b = 255; root.cover-color = #ff00ff; } } }
+                    Rectangle { width: 28px; height: 28px; background: #00ffff; border-radius: 4px; TouchArea { clicked => { root.cover-r = 0; root.cover-g = 255; root.cover-b = 255; root.cover-color = #00ffff; } } }
+                    Rectangle { width: 28px; height: 28px; background: #ffffff; border-radius: 4px; border-width: 1px; border-color: Palette.border; TouchArea { clicked => { root.cover-r = 255; root.cover-g = 255; root.cover-b = 255; root.cover-color = #ffffff; } } }
+                    Rectangle { width: 28px; height: 28px; background: #000000; border-radius: 4px; TouchArea { clicked => { root.cover-r = 0; root.cover-g = 0; root.cover-b = 0; root.cover-color = #000000; } } }
+                }
+
+                // Real circular color wheel via conic gradient
+                Rectangle {
+                    width: 160px;
+                    height: 160px;
+                    border-radius: 80px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    clip: true;
+                    background: @conic-gradient(red 0deg, yellow 60deg, lime 120deg, cyan 180deg, blue 240deg, magenta 300deg, red 360deg);
+                    Rectangle {
+                        width: 10px; height: 10px;
+                        x: root.wheel-dot-x - self.width / 2;
+                        y: root.wheel-dot-y - self.height / 2;
+                        background: root.cover-color;
+                        border-radius: 5px;
+                        border-width: 1px;
+                        border-color: #ffffff;
+                    }
+                    wheel-touch := TouchArea {
+                        width: 100%; height: 100%;
+                        moved => {
+                            if (self.pressed) {
+                                root.wheel-dot-x = self.mouse-x;
+                                root.wheel-dot-y = self.mouse-y;
+                                if (self.width > 0) {
+                                    if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 60) {
+                                        root.cover-r = 255;
+                                        root.cover-g = Math.round((Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180) / 60 * 255);
+                                        root.cover-b = 0;
+                                    } else if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 120) {
+                                        root.cover-r = Math.round((120 - (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180)) / 60 * 255);
+                                        root.cover-g = 255;
+                                        root.cover-b = 0;
+                                    } else if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 180) {
+                                        root.cover-r = 0;
+                                        root.cover-g = 255;
+                                        root.cover-b = Math.round((Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 - 120) / 60 * 255);
+                                    } else if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 240) {
+                                        root.cover-r = 0;
+                                        root.cover-g = Math.round((240 - (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180)) / 60 * 255);
+                                        root.cover-b = 255;
+                                    } else if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 300) {
+                                        root.cover-r = Math.round((Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 - 240) / 60 * 255);
+                                        root.cover-g = 0;
+                                        root.cover-b = 255;
+                                    } else {
+                                        root.cover-r = 255;
+                                        root.cover-g = 0;
+                                        root.cover-b = Math.round((360 - (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180)) / 60 * 255);
+                                    }
+                                    root.cover-color = rgb(root.cover-r, root.cover-g, root.cover-b);
+                                }
+                            }
+                        }
+                        clicked => {
+                            root.wheel-dot-x = self.mouse-x;
+                            root.wheel-dot-y = self.mouse-y;
+                            if (self.width > 0) {
+                                if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 60) {
+                                    root.cover-r = 255;
+                                    root.cover-g = Math.round((Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180) / 60 * 255);
+                                    root.cover-b = 0;
+                                } else if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 120) {
+                                    root.cover-r = Math.round((120 - (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180)) / 60 * 255);
+                                    root.cover-g = 255;
+                                    root.cover-b = 0;
+                                } else if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 180) {
+                                    root.cover-r = 0;
+                                    root.cover-g = 255;
+                                    root.cover-b = Math.round((Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 - 120) / 60 * 255);
+                                } else if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 240) {
+                                    root.cover-r = 0;
+                                    root.cover-g = Math.round((240 - (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180)) / 60 * 255);
+                                    root.cover-b = 255;
+                                } else if (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 < 300) {
+                                    root.cover-r = Math.round((Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180 - 240) / 60 * 255);
+                                    root.cover-g = 0;
+                                    root.cover-b = 255;
+                                } else {
+                                    root.cover-r = 255;
+                                    root.cover-g = 0;
+                                    root.cover-b = Math.round((360 - (Math.atan2((self.mouse-y - self.height / 2) / 1px, (self.mouse-x - self.width / 2) / 1px) / 1deg + 180)) / 60 * 255);
+                                }
+                                root.cover-color = rgb(root.cover-r, root.cover-g, root.cover-b);
+                            }
+                        }
+                    }
+                }
+                // linear hue strip as secondary picker
+                Rectangle {
+                    height: 14px;
+                    width: 100%;
+                    border-radius: 4px;
+                    clip: true;
+                    Image {
+                        source: @image-url("../assets/wheel.png");
+                        width: 100%;
+                        height: 100%;
+                        image-fit: cover;
+                    }
+                    strip-touch := TouchArea {
+                        clicked => {
+                            if (strip-touch.width > 0) {
+                                if (strip-touch.mouse-x / strip-touch.width * 360 < 60) {
+                                    root.cover-r = 255;
+                                    root.cover-g = Math.round(strip-touch.mouse-x / strip-touch.width * 360 / 60 * 255);
+                                    root.cover-b = 0;
+                                } else if (strip-touch.mouse-x / strip-touch.width * 360 < 120) {
+                                    root.cover-r = Math.round((120 - strip-touch.mouse-x / strip-touch.width * 360) / 60 * 255);
+                                    root.cover-g = 255;
+                                    root.cover-b = 0;
+                                } else if (strip-touch.mouse-x / strip-touch.width * 360 < 180) {
+                                    root.cover-r = 0;
+                                    root.cover-g = 255;
+                                    root.cover-b = Math.round((strip-touch.mouse-x / strip-touch.width * 360 - 120) / 60 * 255);
+                                } else if (strip-touch.mouse-x / strip-touch.width * 360 < 240) {
+                                    root.cover-r = 0;
+                                    root.cover-g = Math.round((240 - strip-touch.mouse-x / strip-touch.width * 360) / 60 * 255);
+                                    root.cover-b = 255;
+                                } else if (strip-touch.mouse-x / strip-touch.width * 360 < 300) {
+                                    root.cover-r = Math.round((strip-touch.mouse-x / strip-touch.width * 360 - 240) / 60 * 255);
+                                    root.cover-g = 0;
+                                    root.cover-b = 255;
+                                } else {
+                                    root.cover-r = 255;
+                                    root.cover-g = 0;
+                                    root.cover-b = Math.round((360 - strip-touch.mouse-x / strip-touch.width * 360) / 60 * 255);
+                                }
+                                root.cover-color = rgb(root.cover-r, root.cover-g, root.cover-b);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -142,8 +354,6 @@ export component NetworkSizePage inherits VerticalLayout {
 
 export component TimeoutPage inherits VerticalLayout {
     in-out property <int> active-timeout: 65;
-    in-out property <int> sleep-timeout: 500;
-    in-out property <int> keep-running-seconds: 10;
 
     spacing: 12px;
     alignment: start;
@@ -164,29 +374,11 @@ export component TimeoutPage inherits VerticalLayout {
                     edited => { root.active-timeout = self.value; }
                 }
             }
-            HorizontalLayout {
-                spacing: 12px;
-                alignment: start;
-                Text { text: "Sleep timeout (ms):"; vertical-alignment: center; font-size: 13px; }
-                SpinBox {
-                    width: 120px;
-                    value: root.sleep-timeout;
-                    minimum: 100;
-                    maximum: 5000;
-                    edited => { root.sleep-timeout = self.value; }
-                }
-            }
-            HorizontalLayout {
-                spacing: 12px;
-                alignment: start;
-                Text { text: "Keep running (sec):"; vertical-alignment: center; font-size: 13px; }
-                SpinBox {
-                    width: 120px;
-                    value: root.keep-running-seconds;
-                    minimum: 1;
-                    maximum: 120;
-                    edited => { root.keep-running-seconds = self.value; }
-                }
+            Text {
+                text: "No automatic timeout – detection stays active until Deactivate. (nms=0.1)";
+                font-size: 11px;
+                color: Palette.foreground.transparentize(40%);
+                wrap: word-wrap;
             }
         }
     }
@@ -213,10 +405,11 @@ export component AdditionalOptionsPage inherits VerticalLayout {
         VerticalLayout {
             spacing: 8px;
             CheckBox {
-                text: "Auto-start with Windows";
+                text: "Auto-start with system";
                 checked: root.auto-startup;
                 toggled => { root.auto-startup = self.checked; }
             }
+
             CheckBox {
                 text: "Real-time process priority";
                 checked: root.is-priority-realtime;

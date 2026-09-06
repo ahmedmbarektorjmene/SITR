@@ -8,7 +8,6 @@ pub struct PlatformCapabilities {
     pub overlay: bool,
     pub system_tray: bool,
     pub startup: bool,
-    pub screenshot: bool,
 }
 
 impl Default for PlatformCapabilities {
@@ -20,7 +19,6 @@ impl Default for PlatformCapabilities {
             overlay: true,
             system_tray: true,
             startup: true,
-            screenshot: true,
         }
     }
 }
