@@ -34,10 +34,10 @@ pub enum UiCommand {
     SetCpuLimitEnabled(bool),
     SetMaxCpuLimit(u8),
     SetToggleKey(String),
-    SetScreenshotKey(String),
     SetIsAllWindows(bool),
     SetIsIncludeWindow(bool),
     SetIsExcludeWindow(bool),
+    ConfigureGlobalShortcut,
 }
 
 #[derive(Debug, Clone)]
@@ -50,4 +50,6 @@ pub enum CoreEvent {
     ConfigSaved,
     ConfigLoaded(PordaConfig),
     Terminated,
+    HotkeyDisplayUpdated(String),
+    HotkeyConfigureResult(Result<String, String>),
 }

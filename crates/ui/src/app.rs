@@ -82,6 +82,30 @@ pub fn request_quit() {
     }
 }
 
+/// Update hotkey display from any thread (portal-authoritative).
+pub fn request_hotkey_update(display: String, status: String, available: bool, configuring: bool) {
+    if let Some(weak) = app_weak_lock().lock().unwrap().clone() {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_hotkey_display(display.into());
+                app.set_hotkey_status(status.into());
+                app.set_hotkey_available(available);
+                app.set_hotkey_configuring(configuring);
+            }
+        });
+    }
+}
+
+pub fn request_hotkey_configuring(configuring: bool) {
+    if let Some(weak) = app_weak_lock().lock().unwrap().clone() {
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_hotkey_configuring(configuring);
+            }
+        });
+    }
+}
+
 pub struct PordaApp {
     ui_state: SharedUiState,
     command_tx: std::sync::mpsc::Sender<UiCommand>,
@@ -123,6 +147,12 @@ impl PordaApp {
             app.set_max_cpu_limit(state.max_cpu_limit as i32);
             app.set_cpu_usage(state.cpu_usage);
             app.set_current_page(state.current_page as i32);
+            app.set_toggle_key(state.toggle_key.clone().into());
+            app.set_hotkey_display(state.hotkey_display.clone().into());
+            app.set_hotkey_status(state.hotkey_status.clone().into());
+            app.set_hotkey_available(state.hotkey_available);
+            app.set_hotkey_configuring(state.hotkey_configuring);
+            app.set_is_linux(cfg!(target_os = "linux"));
         }
 
         let weak = app.as_weak();
@@ -212,6 +242,10 @@ impl PordaApp {
                     app.set_is_priority_realtime(state.is_priority_realtime);
                     app.set_is_allow_max_cpu_limit(state.is_allow_max_cpu_limit);
                     app.set_max_cpu_limit(state.max_cpu_limit as i32);
+                    app.set_hotkey_display(state.hotkey_display.clone().into());
+                    app.set_hotkey_status(state.hotkey_status.clone().into());
+                    app.set_hotkey_available(state.hotkey_available);
+                    app.set_hotkey_configuring(state.hotkey_configuring);
                 }
             });
         }
@@ -227,6 +261,13 @@ impl PordaApp {
             let h = handler.clone();
             app.on_refresh_hotkeys(move || {
                 h.refresh_hotkeys();
+            });
+        }
+
+        {
+            let h = handler.clone();
+            app.on_configure_hotkey(move || {
+                h.configure_global_shortcut();
             });
         }
 
@@ -337,6 +378,7 @@ fn sync_ui_to_state(state: &SharedUiState, app: &AppWindow) {
     s.is_priority_realtime = app.get_is_priority_realtime();
     s.is_allow_max_cpu_limit = app.get_is_allow_max_cpu_limit();
     s.max_cpu_limit = app.get_max_cpu_limit() as u8;
+    s.toggle_key = app.get_toggle_key().to_string();
 }
 
 #[cfg(test)]

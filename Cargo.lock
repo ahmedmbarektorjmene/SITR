@@ -4202,6 +4202,7 @@ dependencies = [
  "ashpd",
  "config",
  "dirs",
+ "futures-util",
  "image",
  "pipewire",
  "serde",

@@ -1,6 +1,6 @@
 import { Button, CheckBox, SpinBox, LineEdit, TextEdit, GroupBox, Palette } from "std-widgets.slint";
 
-import { SidebarButton, BasicPage, NetworkSizePage, TimeoutPage, AdditionalOptionsPage, InExAppPage, TrackingPage, ScalingPage, AboutPage } from "components/sidebar.slint";
+import { SidebarButton, BasicPage, NetworkSizePage, TimeoutPage, AdditionalOptionsPage, InExAppPage, ScalingPage, AboutPage } from "components/sidebar.slint";
 
 component SettingsSidebar inherits VerticalLayout {
     in property <int> current-page: 0;
@@ -15,7 +15,6 @@ component SettingsSidebar inherits VerticalLayout {
     SidebarButton { label: "Timeout"; active: current-page == 2; clicked => { root.navigate(2); } }
     SidebarButton { label: "Additional Options"; active: current-page == 3; clicked => { root.navigate(3); } }
     SidebarButton { label: "In/Ex App"; active: current-page == 4; clicked => { root.navigate(4); } }
-    SidebarButton { label: "Tracking"; active: current-page == 5; clicked => { root.navigate(5); } }
     SidebarButton { label: "Scaling"; active: current-page == 6; clicked => { root.navigate(6); } }
     SidebarButton { label: "About"; active: current-page == 7; clicked => { root.navigate(7); } }
 }
@@ -47,8 +46,12 @@ export component AppWindow inherits Window {
     in-out property <bool> is-priority-realtime: false;
     in-out property <bool> is-allow-max-cpu-limit: false;
     in-out property <int> max-cpu-limit: 90;
-    in-out property <string> toggle-key: "F2";
-    in-out property <string> screenshot-key: "F1";
+    in-out property <string> toggle-key: "Meta+Shift+P";
+    in property <string> hotkey-display: "Meta + Shift + P";
+    in property <string> hotkey-status: "Shortcut managed by desktop environment";
+    in property <bool> hotkey-available: true;
+    in property <bool> hotkey-configuring: false;
+    in property <bool> is-linux: true;
     in property <float> cpu-usage: 0.0;
     in property <string> detection-state: "Sleep";
     in-out property <int> current-page: 0;
@@ -62,6 +65,7 @@ export component AppWindow inherits Window {
     callback restore-defaults();
     callback take-screenshot();
     callback refresh-hotkeys();
+    callback configure-hotkey();
     callback terminate();
     callback navigate(int);
 
@@ -87,13 +91,6 @@ export component AppWindow inherits Window {
                         text: "Porda AI";
                         font-size: 16px;
                         font-weight: 700;
-                        horizontal-alignment: center;
-                    }
-
-                    Text {
-                        text: root.is-active ? "● Active" : "○ Inactive";
-                        color: root.is-active ? #22c55e : #94a3b8;
-                        font-size: 12px;
                         horizontal-alignment: center;
                     }
                 }
@@ -145,7 +142,13 @@ export component AppWindow inherits Window {
                         auto-startup: root.auto-startup;
                         is-priority-realtime: root.is-priority-realtime;
                         toggle-key: root.toggle-key;
-                        screenshot-key: root.screenshot-key;
+                        hotkey-display: root.hotkey-display;
+                        hotkey-status: root.hotkey-status;
+                        hotkey-available: root.hotkey-available;
+                        hotkey-configuring: root.hotkey-configuring;
+                        is-linux: root.is-linux;
+                        configure-hotkey => { root.configure-hotkey(); }
+                        refresh-hotkeys => { root.refresh-hotkeys(); }
                     }
 
                     if root.current-page == 4: InExAppPage {
@@ -156,7 +159,6 @@ export component AppWindow inherits Window {
                         exclude-windows: root.exclude-windows;
                     }
 
-                    if root.current-page == 5: TrackingPage {}
 
                     if root.current-page == 6: ScalingPage {
                         is-allow-max-cpu-limit: root.is-allow-max-cpu-limit;

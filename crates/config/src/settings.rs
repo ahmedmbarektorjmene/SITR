@@ -10,7 +10,6 @@ pub struct PordaConfig {
     pub performance: PerformanceConfig,
     pub windows: WindowConfig,
     pub startup: StartupConfig,
-    pub tracking: TrackingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +38,8 @@ pub struct OverlayConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotkeyConfig {
     pub toggle_key: String,
-    pub screenshot_key: String,
+    // screenshot_key removed: global screenshot hotkey no longer registered (P0 single-shortcut requirement)
+    // Keep for migration: if old config contains screenshot_key it will be ignored on load (serde default)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,12 +63,6 @@ pub struct WindowConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartupConfig {
     pub auto_startup: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrackingConfig {
-    pub enabled: bool,
-    pub endpoint: String,
 }
 
 impl PordaConfig {

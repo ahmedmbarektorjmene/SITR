@@ -30,10 +30,14 @@ pub struct UiState {
     pub is_allow_max_cpu_limit: bool,
     pub max_cpu_limit: u8,
     pub toggle_key: String,
-    pub screenshot_key: String,
     pub cpu_usage: f32,
     pub current_page: usize,
     pub detection_state: String,
+    // Portal-authoritative hotkey display (Linux/Wayland)
+    pub hotkey_display: String,
+    pub hotkey_status: String,
+    pub hotkey_available: bool,
+    pub hotkey_configuring: bool,
 }
 
 impl Default for UiState {
@@ -72,10 +76,32 @@ impl UiState {
             is_allow_max_cpu_limit: config.performance.is_allow_max_cpu_limit,
             max_cpu_limit: config.performance.max_cpu_limit,
             toggle_key: config.hotkeys.toggle_key.clone(),
-            screenshot_key: config.hotkeys.screenshot_key.clone(),
             cpu_usage: 0.0,
             current_page: 0,
             detection_state: "Sleep".to_string(),
+            hotkey_display: {
+                #[cfg(target_os = "linux")]
+                {
+                    // Will be populated from portal on startup; placeholder
+                    "Not configured".to_string()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    config.hotkeys.toggle_key.clone()
+                }
+            },
+            hotkey_status: {
+                #[cfg(target_os = "linux")]
+                {
+                    "Shortcut managed by desktop environment".to_string()
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    String::new()
+                }
+            },
+            hotkey_available: true,
+            hotkey_configuring: false,
         }
     }
 
@@ -102,7 +128,6 @@ impl UiState {
             },
             hotkeys: config::settings::HotkeyConfig {
                 toggle_key: self.toggle_key.clone(),
-                screenshot_key: self.screenshot_key.clone(),
             },
             performance: config::settings::PerformanceConfig {
                 is_priority_realtime: self.is_priority_realtime,
@@ -131,7 +156,6 @@ impl UiState {
             startup: config::settings::StartupConfig {
                 auto_startup: self.auto_startup,
             },
-            tracking: config::settings::TrackingConfig::default(),
         }
     }
 }

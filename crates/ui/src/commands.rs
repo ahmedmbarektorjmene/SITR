@@ -77,6 +77,10 @@ impl UiCommandHandler {
         let _ = self.command_tx.send(UiCommand::RefreshHotkeys);
     }
 
+    pub fn configure_global_shortcut(&self) {
+        let _ = self.command_tx.send(UiCommand::ConfigureGlobalShortcut);
+    }
+
     pub fn terminate(&self) {
         let _ = self.command_tx.send(UiCommand::Terminate);
     }

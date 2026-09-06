@@ -1,4 +1,4 @@
-import { CheckBox, SpinBox, LineEdit, TextEdit, GroupBox, Palette } from "std-widgets.slint";
+import { Button, CheckBox, SpinBox, LineEdit, TextEdit, GroupBox, Palette } from "std-widgets.slint";
 
 export component SidebarButton inherits Rectangle {
     in property <string> label;
@@ -195,8 +195,15 @@ export component TimeoutPage inherits VerticalLayout {
 export component AdditionalOptionsPage inherits VerticalLayout {
     in-out property <bool> auto-startup: true;
     in-out property <bool> is-priority-realtime: false;
-    in-out property <string> toggle-key: "F2";
-    in-out property <string> screenshot-key: "F1";
+    in-out property <string> toggle-key: "Meta+Shift+P";
+    // Linux/Wayland portal-authoritative display
+    in property <string> hotkey-display: "Meta + Shift + P";
+    in property <string> hotkey-status: "Shortcut managed by desktop environment";
+    in property <bool> hotkey-available: true;
+    in property <bool> hotkey-configuring: false;
+    in property <bool> is-linux: true;
+    callback configure-hotkey;
+    callback refresh-hotkeys;
 
     spacing: 12px;
     alignment: start;
@@ -219,27 +226,76 @@ export component AdditionalOptionsPage inherits VerticalLayout {
     }
 
     GroupBox {
-        title: "Hotkeys";
+        title: "Global Hotkey";
         VerticalLayout {
             spacing: 10px;
-            HorizontalLayout {
-                spacing: 12px;
-                alignment: start;
-                Text { text: "Toggle key:"; vertical-alignment: center; font-size: 13px; }
-                LineEdit {
-                    width: 100px;
-                    text: root.toggle-key;
-                    edited => { root.toggle-key = self.text; }
+            Text {
+                text: "Toggle Detection";
+                font-size: 12px;
+                font-weight: 600;
+            }
+            // Linux/Wayland: portal-managed read-only display
+            if root.is-linux: VerticalLayout {
+                spacing: 6px;
+                Rectangle {
+                    height: 28px;
+                    background: Palette.alternate-background;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        alignment: center;
+                        Text {
+                            text: root.hotkey-configuring ? "Configuring…" : root.hotkey-display;
+                            font-size: 13px;
+                            color: root.hotkey-available ? Palette.foreground : Palette.foreground.transparentize(50%);
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Button {
+                        text: "Configure Shortcut";
+                        enabled: root.hotkey-available && !root.hotkey-configuring;
+                        clicked => { root.configure-hotkey(); }
+                    }
+                    Button {
+                        text: "Refresh";
+                        enabled: !root.hotkey-configuring;
+                        clicked => { root.refresh-hotkeys(); }
+                    }
+                }
+                if root.hotkey-status != "" && !root.hotkey-configuring: Text {
+                    text: root.hotkey-status;
+                    font-size: 11px;
+                    color: Palette.foreground.transparentize(40%);
+                    wrap: word-wrap;
                 }
             }
-            HorizontalLayout {
-                spacing: 12px;
-                alignment: start;
-                Text { text: "Screenshot key:"; vertical-alignment: center; font-size: 13px; }
-                LineEdit {
-                    width: 100px;
-                    text: root.screenshot-key;
-                    edited => { root.screenshot-key = self.text; }
+            // Non-Linux: editable LineEdit (Windows native)
+            if !root.is-linux: VerticalLayout {
+                spacing: 6px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    alignment: start;
+                    Text { text: "Toggle key:"; vertical-alignment: center; font-size: 13px; }
+                    LineEdit {
+                        width: 140px;
+                        text: root.toggle-key;
+                        edited => { root.toggle-key = self.text; }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Button {
+                        text: "Refresh Hotkeys";
+                        clicked => { root.refresh-hotkeys(); }
+                    }
                 }
             }
         }
@@ -298,19 +354,6 @@ export component InExAppPage inherits VerticalLayout {
     }
 }
 
-export component TrackingPage inherits VerticalLayout {
-    spacing: 12px;
-    alignment: start;
-
-    GroupBox {
-        title: "Analytics";
-        Text {
-            text: "Tracking configuration will be available in the next update.";
-            font-size: 13px;
-            color: Palette.foreground.transparentize(40%);
-        }
-    }
-}
 
 export component ScalingPage inherits VerticalLayout {
     in-out property <bool> is-allow-max-cpu-limit: false;

@@ -11,7 +11,6 @@ impl Default for PordaConfig {
             performance: PerformanceConfig::default(),
             windows: WindowConfig::default(),
             startup: StartupConfig::default(),
-            tracking: TrackingConfig::default(),
         }
     }
 }
@@ -47,9 +46,12 @@ impl Default for OverlayConfig {
 
 impl Default for HotkeyConfig {
     fn default() -> Self {
+        // Single global shortcut: Meta+Shift+P — inspected KDE Plasma 6
+        // kglobalshortcutsrc shows no existing entry uses this combo; uses
+        // Meta (global) + Shift to avoid bare F-keys and KDE's Meta+digit etc.
+        // Portal GlobalShortcuts supports this XDG shortcut syntax.
         Self {
-            toggle_key: "F2".to_string(),
-            screenshot_key: "F1".to_string(),
+            toggle_key: "Meta+Shift+P".to_string(),
         }
     }
 }
@@ -116,15 +118,6 @@ impl Default for WindowConfig {
 impl Default for StartupConfig {
     fn default() -> Self {
         Self { auto_startup: true }
-    }
-}
-
-impl Default for TrackingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            endpoint: "https://www.google-analytics.com/mp/collect".to_string(),
-        }
     }
 }
 

@@ -41,6 +41,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pipeline = Pipeline::new(Arc::clone(&core_state), event_tx.clone());
     pipeline.start();
 
+    // Hotkey backend – Wayland-native via GlobalShortcuts portal (KDE Plasma)
+    // Single global shortcut: porda_toggle_v2 Meta+Shift+P → ToggleDetection (no screenshot hotkey)
+    // Portal is authoritative; UI shows portal binding, not settings.json directly.
+    #[cfg(target_os = "linux")]
+    let hotkey_manager = {
+        use platform::linux::hotkeys::{HotkeyAction, LinuxHotkeyManager};
+        let (hk_tx, hk_rx) = mpsc::channel::<HotkeyAction>();
+        let mgr = Arc::new(LinuxHotkeyManager::new(hk_tx));
+        let toggle = core_state.lock().unwrap().config.hotkeys.toggle_key.clone();
+        tracing::info!("Hotkey backend starting: toggle='{}'", toggle);
+        if let Err(e) = mgr.refresh(&toggle) {
+            tracing::error!("Initial hotkey registration failed: {}", e);
+            tracing::error!("Hotkey backend not active – check portal and KDE session");
+        } else {
+            tracing::info!(
+                "Global hotkey registered: toggle='{}' (porda_toggle_v2)",
+                toggle
+            );
+        }
+        // Initialize portal-authoritative display in shared UI state
+        {
+            let mut ui = ui_state.lock().unwrap();
+            ui.hotkey_display = mgr.current_shortcut_display();
+            ui.hotkey_status = mgr.portal_status_text();
+            ui.hotkey_available = mgr.is_portal_available();
+            ui.hotkey_configuring = false;
+        }
+        // Forward HotkeyAction → UiCommand without polling (blocking recv)
+        // This forwarder remains alive independently of Slint UI thread (hidden/parked)
+        let cmd_tx_for_hotkeys = cmd_tx.clone();
+        let _hk_forward = std::thread::Builder::new()
+            .name("hotkey-forwarder".to_string())
+            .spawn(move || {
+                tracing::info!("Hotkey forwarder started (blocking recv, no polling)");
+                while let Ok(action) = hk_rx.recv() {
+                    match action {
+                        HotkeyAction::ToggleDetection => {
+                            tracing::info!("HotkeyAction::ToggleDetection received → UiCommand::ToggleActivation");
+                            let _ = cmd_tx_for_hotkeys.send(UiCommand::ToggleActivation);
+                        }
+                    }
+                }
+                tracing::info!("hotkey forwarder exiting (channel closed)");
+            })
+            .expect("Failed to spawn hotkey forwarder");
+        // Keep manager alive in Arc; hk_rx is moved into forwarder, mgr holds portal thread
+        mgr
+    };
+    #[cfg(not(target_os = "linux"))]
+    let hotkey_manager: Option<()> = None;
+
     tracing::info!("overlay initialized");
     // UI and tray are long-lived; tray must stay alive for entire lifetime.
     // Do NOT create tray inside UI thread and do NOT drop it after run().
@@ -106,10 +157,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tracing::info!("Terminated");
                         break;
                     }
+                    CoreEvent::HotkeyDisplayUpdated(hotkey_disp) => {
+                        let (status, available) = {
+                            let mut ui = ui_state_for_events.lock().unwrap();
+                            ui.hotkey_display = hotkey_disp.clone();
+                            // status/available will be updated separately, keep current
+                            (ui.hotkey_status.clone(), ui.hotkey_available)
+                        };
+                        tracing::info!("Hotkey display updated: {}", hotkey_disp);
+                        ui::request_hotkey_update(hotkey_disp, status, available, false);
+                    }
+                    CoreEvent::HotkeyConfigureResult(res) => {
+                        let (hotkey_disp, status, available) = {
+                            let mut ui = ui_state_for_events.lock().unwrap();
+                            ui.hotkey_configuring = false;
+                            match &res {
+                                Ok(d) => {
+                                    ui.hotkey_display = d.clone();
+                                    ui.hotkey_available = true;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Hotkey configure failed: {}", e);
+                                    if e.contains("unavailable") {
+                                        ui.hotkey_display =
+                                            "Global shortcuts unavailable".to_string();
+                                        ui.hotkey_status =
+                                            "Global shortcuts unavailable".to_string();
+                                        ui.hotkey_available = false;
+                                    }
+                                }
+                            }
+                            (
+                                ui.hotkey_display.clone(),
+                                ui.hotkey_status.clone(),
+                                ui.hotkey_available,
+                            )
+                        };
+                        let disp_for_ui = match res {
+                            Ok(d) => d,
+                            Err(e) => {
+                                if e.contains("unavailable") {
+                                    "Global shortcuts unavailable".to_string()
+                                } else {
+                                    hotkey_disp
+                                }
+                            }
+                        };
+                        ui::request_hotkey_update(disp_for_ui, status, available, false);
+                    }
                 }
             }
         })?;
 
+    #[cfg(target_os = "linux")]
+    let hk_manager_for_commands = Arc::clone(&hotkey_manager);
     let event_tx_for_commands = event_tx.clone();
     let core_state_for_commands = Arc::clone(&core_state);
     let ui_state_for_commands = Arc::clone(&ui_state);
@@ -179,7 +280,107 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     },
                     UiCommand::RefreshHotkeys => {
-                        tracing::info!("Hotkeys refreshed");
+                        #[cfg(target_os = "linux")]
+                        {
+                            let toggle = {
+                                let s = core_state_for_commands.lock().unwrap();
+                                s.config.hotkeys.toggle_key.clone()
+                            };
+                            let res = hk_manager_for_commands.refresh(&toggle);
+                            match &res {
+                                Ok(()) => tracing::info!(
+                                    "Hotkeys refreshed: toggle='{}' (porda_toggle_v2)",
+                                    toggle
+                                ),
+                                Err(e) => tracing::error!("Hotkey refresh failed: {}", e),
+                            }
+                            // After refresh, update portal-authoritative display
+                            let hotkey_disp = hk_manager_for_commands.current_shortcut_display();
+                            let status = hk_manager_for_commands.portal_status_text();
+                            let available = hk_manager_for_commands.is_portal_available();
+                            {
+                                let mut ui = ui_state_for_commands.lock().unwrap();
+                                ui.hotkey_display = hotkey_disp.clone();
+                                ui.hotkey_status = status.clone();
+                                ui.hotkey_available = available;
+                                ui.hotkey_configuring = false;
+                            }
+                            let _ = event_tx_for_commands.send(CoreEvent::HotkeyDisplayUpdated(hotkey_disp.clone()));
+                            ui::request_hotkey_update(
+                                hotkey_disp,
+                                status,
+                                available,
+                                false,
+                            );
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            tracing::info!("Hotkeys refreshed (non-Linux stub)");
+                        }
+                    }
+                    UiCommand::ConfigureGlobalShortcut => {
+                        #[cfg(target_os = "linux")]
+                        {
+                            tracing::info!("ConfigureGlobalShortcut requested → invoking portal ConfigureShortcuts");
+                            {
+                                let mut ui = ui_state_for_commands.lock().unwrap();
+                                ui.hotkey_configuring = true;
+                            }
+                            ui::request_hotkey_configuring(true);
+                            // Also push configuring display
+                            ui::request_hotkey_update(
+                                "Configuring…".to_string(),
+                                String::new(),
+                                false,
+                                true,
+                            );
+                            let result = hk_manager_for_commands.configure_shortcut();
+                            match &result {
+                                Ok(d) => tracing::info!("ConfigureShortcut succeeded: {}", d),
+                                Err(e) => tracing::warn!("ConfigureShortcut result: {}", e),
+                            }
+                            // Update shared state based on result
+                            let (disp_for_state, status, available) = match &result {
+                                Ok(d) => (
+                                    d.clone(),
+                                    hk_manager_for_commands.portal_status_text(),
+                                    hk_manager_for_commands.is_portal_available(),
+                                ),
+                                Err(e) => {
+                                    if e.contains("unavailable") || e.contains("RequiresVersion") {
+                                        (
+                                            "Global shortcuts unavailable".to_string(),
+                                            "Global shortcuts unavailable".to_string(),
+                                            false,
+                                        )
+                                    } else {
+                                        // Cancelled or other: restore previous display
+                                        let d = hk_manager_for_commands.current_shortcut_display();
+                                        (
+                                            d.clone(),
+                                            hk_manager_for_commands.portal_status_text(),
+                                            hk_manager_for_commands.is_portal_available(),
+                                        )
+                                    }
+                                }
+                            };
+                            {
+                                let mut ui = ui_state_for_commands.lock().unwrap();
+                                ui.hotkey_display = disp_for_state.clone();
+                                ui.hotkey_status = status.clone();
+                                ui.hotkey_available = available;
+                                ui.hotkey_configuring = false;
+                            }
+                            let _ = event_tx_for_commands.send(CoreEvent::HotkeyConfigureResult(result));
+                            ui::request_hotkey_update(disp_for_state, status, available, false);
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            tracing::warn!("ConfigureGlobalShortcut not supported on non-Linux");
+                            let _ = event_tx_for_commands.send(CoreEvent::HotkeyConfigureResult(Err(
+                                "not supported on this platform".to_string(),
+                            )));
+                        }
                     }
                     UiCommand::RefreshOverlay => {
                         tracing::info!("Overlay refreshed");
@@ -243,7 +444,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Ensure tray is torn down cleanly regardless of which path triggered shutdown
-    tracing::info!("shutting down – stopping pipeline, overlay, tray");
+    tracing::info!("shutting down – stopping pipeline, overlay, tray, hotkeys");
+    #[cfg(target_os = "linux")]
+    {
+        let _ = hotkey_manager.unregister_all();
+        // Arc will drop and join portal thread
+    }
     pipeline.stop();
     // Unblock event handler (it waits on event_rx recv) – send Terminated and drop sender
     let _ = event_tx.send(CoreEvent::Terminated);
